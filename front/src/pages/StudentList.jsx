@@ -825,7 +825,7 @@ export default function StudentList() {
         </div>
       </div>
 
-      {/* 수정 모달 */}
+            {/* 수정 모달 */}
       {editingStudent && (
         <div
           className="modal-backdrop"
@@ -843,50 +843,90 @@ export default function StudentList() {
             className="modal"
             style={{
               width: '100%',
-              maxWidth: 520,
+              maxWidth: 600,
               borderRadius: 18,
               background: '#ffffff',
-              padding: 20,
+              position: 'relative',   
+              padding: 24,
               boxShadow:
                 '0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)',
             }}
           >
+            {/* 헤더 */}
             <div
               style={{
-                marginBottom: 12,
+                marginBottom: 16,
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
               }}
             >
-              <h2
-                style={{
-                  fontSize: 16,
-                  fontWeight: 600,
-                }}
-              >
-                학생 정보 수정
-              </h2>
+              <div>
+                <h2
+                  style={{
+                    fontSize: 18,
+                    fontWeight: 600,
+                    marginBottom: 2,
+                  }}
+                >
+                  학생 정보 수정
+                </h2>
+                <p
+                  style={{
+                    fontSize: 12,
+                    color: '#6b7280',
+                  }}
+                >
+                  이름 · 별칭 · 학교 단계 · 메모를 한 번에 정리해 주세요.
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={closeEditModal}
                 style={{
+                  position: 'absolute',
+                  top: 18,
+                  right: 16,
                   border: 'none',
                   background: 'transparent',
-                  fontSize: 18,
+                  fontSize: 20,
                   cursor: 'pointer',
+                  lineHeight: 1,
+                  color: '#9ca3af',
                 }}
               >
                 ×
               </button>
             </div>
 
+            {/* 폼 본문 */}
             <form
               onSubmit={handleEditSave}
-              style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                columnGap: 16,
+                rowGap: 12,
+              }}
             >
-              <label style={{ fontSize: 13 }}>
-                이름
+              {/* 이름 */}
+              <label
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  fontSize: 13,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: '#6b7280',
+                    fontWeight: 500,
+                  }}
+                >
+                  이름
+                </span>
                 <input
                   type="text"
                   name="name"
@@ -894,18 +934,33 @@ export default function StudentList() {
                   onChange={handleEditChange}
                   required
                   style={{
-                    width: '100%',
-                    marginTop: 4,
-                    padding: '8px 10px',
-                    borderRadius: 10,
+                    width: '50%',
+                    padding: '9px 12px',
+                    borderRadius: 12,
                     border: '1px solid #d1d5db',
                     fontSize: 14,
                   }}
                 />
               </label>
 
-              <label style={{ fontSize: 13 }}>
-                별칭
+              {/* 별칭 */}
+              <label
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  fontSize: 13,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: '#6b7280',
+                    fontWeight: 500,
+                  }}
+                >
+                  별칭
+                </span>
                 <input
                   type="text"
                   name="alias"
@@ -913,27 +968,41 @@ export default function StudentList() {
                   onChange={handleEditChange}
                   placeholder="동명이인 구분용 별칭"
                   style={{
-                    width: '100%',
-                    marginTop: 4,
-                    padding: '8px 10px',
-                    borderRadius: 10,
+                    width: '50%',
+                    padding: '9px 12px',
+                    borderRadius: 12,
                     border: '1px solid #d1d5db',
                     fontSize: 14,
                   }}
                 />
               </label>
 
-              <label style={{ fontSize: 13 }}>
-                학교 단계
+              {/* 학교 단계 */}
+              <label
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  fontSize: 13,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: '#6b7280',
+                    fontWeight: 500,
+                  }}
+                >
+                  학교 단계
+                </span>
                 <select
                   name="schoolLevel"
                   value={editForm.schoolLevel}
                   onChange={handleEditChange}
                   style={{
-                    width: '100%',
-                    marginTop: 4,
-                    padding: '8px 10px',
-                    borderRadius: 10,
+                    width: '50%',
+                    padding: '9px 12px',
+                    borderRadius: 12,
                     border: '1px solid #d1d5db',
                     fontSize: 14,
                     backgroundColor: '#ffffff',
@@ -948,9 +1017,24 @@ export default function StudentList() {
                 </select>
               </label>
 
-              <label style={{ fontSize: 13 }}>
-                상태
-                {/* 상태 드롭다운 (수정 모달) */}
+              {/* 상태 */}
+              <label
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  fontSize: 13,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: '#6b7280',
+                    fontWeight: 500,
+                  }}
+                >
+                  상태
+                </span>
                 {(() => {
                   const hasCustomStatus =
                     editForm.status &&
@@ -965,10 +1049,9 @@ export default function StudentList() {
                       value={editForm.status || ''}
                       onChange={handleEditChange}
                       style={{
-                        width: '100%',
-                        marginTop: 4,
-                        padding: '8px 10px',
-                        borderRadius: 10,
+                        width: '50%',
+                        padding: '9px 12px',
+                        borderRadius: 12,
                         border: '1px solid #d1d5db',
                         fontSize: 14,
                         backgroundColor: '#ffffff',
@@ -985,54 +1068,100 @@ export default function StudentList() {
                 })()}
               </label>
 
-              <label style={{ fontSize: 13 }}>
-                입학일
+              {/* 입학일 */}
+              <label
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  fontSize: 13,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: '#6b7280',
+                    fontWeight: 500,
+                  }}
+                >
+                  입학일
+                </span>
                 <input
                   type="date"
                   name="admission_date"
                   value={editForm.admission_date || ''}
                   onChange={handleEditChange}
                   style={{
-                    width: '100%',
-                    marginTop: 4,
-                    padding: '8px 10px',
-                    borderRadius: 10,
+                    width: '50%',
+                    padding: '9px 12px',
+                    borderRadius: 12,
                     border: '1px solid #d1d5db',
                     fontSize: 14,
                   }}
                 />
               </label>
 
-              <label style={{ fontSize: 13 }}>
-                생년월일
+              {/* 생년월일 */}
+              <label
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  fontSize: 13,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: '#6b7280',
+                    fontWeight: 500,
+                  }}
+                >
+                  생년월일
+                </span>
                 <input
                   type="date"
                   name="birth_date"
                   value={editForm.birth_date || ''}
                   onChange={handleEditChange}
                   style={{
-                    width: '100%',
-                    marginTop: 4,
-                    padding: '8px 10px',
-                    borderRadius: 10,
+                    width: '50%',
+                    padding: '9px 12px',
+                    borderRadius: 12,
                     border: '1px solid #d1d5db',
                     fontSize: 14,
                   }}
                 />
               </label>
 
-              <label style={{ fontSize: 13 }}>
-                메모(별명/특이사항)
+              {/* 메모 – 전체 폭 사용 */}
+              <label
+                style={{
+                  gridColumn: '1 / -1',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  fontSize: 13,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: '#6b7280',
+                    fontWeight: 500,
+                  }}
+                >
+                  메모(별명/특이사항)
+                </span>
                 <textarea
                   name="memo"
                   value={editForm.memo}
                   onChange={handleEditChange}
                   rows={4}
                   style={{
-                    width: '100%',
-                    marginTop: 4,
-                    padding: '8px 10px',
-                    borderRadius: 10,
+                    width: '95%',
+                    padding: '9px 12px',
+                    borderRadius: 12,
                     border: '1px solid #d1d5db',
                     fontSize: 14,
                     resize: 'vertical',
@@ -1041,8 +1170,10 @@ export default function StudentList() {
                 />
               </label>
 
+              {/* 버튼 영역 – 전체 폭 사용 */}
               <div
                 style={{
+                  gridColumn: '1 / -1',
                   marginTop: 8,
                   display: 'flex',
                   justifyContent: 'flex-end',
@@ -1054,7 +1185,7 @@ export default function StudentList() {
                   onClick={closeEditModal}
                   className="btn secondary"
                   style={{
-                    padding: '8px 12px',
+                    padding: '8px 14px',
                     borderRadius: 999,
                     border: '1px solid #d1d5db',
                     background: '#ffffff',
@@ -1069,7 +1200,7 @@ export default function StudentList() {
                   className="btn primary"
                   disabled={savingEdit}
                   style={{
-                    padding: '8px 14px',
+                    padding: '8px 18px',
                     borderRadius: 999,
                     border: 'none',
                     background: '#2563eb',

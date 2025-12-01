@@ -367,7 +367,7 @@ app.get(['/uploads', '/api/uploads'], async (req, res) => {
       uploaded_by: u.uploaded_by,
       uploader_name: uploaderById[u.uploaded_by] || null,
       student_id: u.student_id,
-      student_name: studentsById[u.student_id] || '학생 미확인',
+      student_name: studentsById[u.student_id] || null,
     }))
 
     res.json(uploads)
@@ -444,10 +444,25 @@ app.get(['/uploads/:id', '/api/uploads/:id'], async (req, res) => {
       }
     })
 
+    // ✅ 이 업로드에 연결된 학생 목록을 중복 없이 정리해서 같이 내려줌
+    const studentMap = {}
+    logEntries.forEach(e => {
+      if (e.student_id && e.student_name) {
+        if (!studentMap[e.student_id]) {
+          studentMap[e.student_id] = {
+            id: e.student_id,
+            name: e.student_name,
+          }
+        }
+      }
+    })
+    const students = Object.values(studentMap)
+
     return res.json({
       ...upload,
       raw_text: rawText, // UploadPage.openDetail 에서 사용
       log_entries: logEntries,
+      students,          // ✅ 업로드에 태그된 학생 리스트
     })
   } catch (e) {
     console.error('GET /uploads/:id 에러:', e)
@@ -630,10 +645,27 @@ app.post(['/uploads/:id/log', '/api/uploads/:id/log'], async (req, res) => {
           metrics = [metrics]
         }
 
+        // ✅ 감정: 단일 필드(emotion_tag)에 대표 감정을 넣어준다.
+        //  - e.emotion_tag 가 있으면 그대로
+        //  - 없으면 emotion_tags 배열의 첫 번째 값을 사용
+        let primaryEmotion = e.emotion_tag || null
+        if (!primaryEmotion && Array.isArray(e.emotion_tags) && e.emotion_tags.length > 0) {
+          primaryEmotion = e.emotion_tags[0]
+        }
+
+        // (선택) emotion_tags 전체를 metrics 안에 같이 남기고 싶다면
+        if (Array.isArray(e.emotion_tags) && e.emotion_tags.length > 0) {
+          if (!metrics) {
+            metrics = [{ emotion_tags: e.emotion_tags }]
+          } else if (Array.isArray(metrics) && metrics.length > 0) {
+            metrics[0] = { ...metrics[0], emotion_tags: e.emotion_tags }
+          }
+        }
+
         return {
           log_date: e.log_date || new Date().toISOString().slice(0, 10),
           student_id: studentId, // log_entries.student_id (uuid NOT NULL)
-          emotion_tag: e.emotion_tag || null,
+          emotion_tag: primaryEmotion || null,           // ✅ 대시보드 집계용
           activity_tags: activityTags.length > 0 ? activityTags : null, // text[]
           log_content: e.log_content || null,
           related_metrics: metrics, // jsonb[]
@@ -948,19 +980,44 @@ app.get('/students/:id/activities', async (req, res) => {
 // 학생 추가
 app.post('/api/students', async (req, res) => {
   try {
-    const { name, status, admission_date, birth_date, notes } = req.body || {}
+    const {
+      name,
+      status,
+      current_status,
+      admission_date,
+      birth_date,
+      notes,
+      memo,
+      school_level,
+      alias,
+      is_active,
+    } = req.body || {}
+
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ message: 'name은 필수입니다.' })
     }
 
+    // 상태 값 정리: current_status > status > '재학중'
+    const statusValue = current_status || status || '재학중'
+    // 메모 값 정리: memo > notes
+    const memoValue = memo !== undefined ? memo : notes
+
     const payload = {
       name: name.trim(),
+      status: statusValue,          // 기존 컬럼
+      current_status: statusValue,  // 새 컬럼
+      admission_date: admission_date || null,
+      birth_date: birth_date || null,
+      school_level: school_level || null,
+      alias: alias || null,
+      is_active:
+        typeof is_active === 'boolean' ? is_active : true,
     }
 
-    if (status !== undefined) payload.status = status
-    if (admission_date !== undefined) payload.admission_date = admission_date
-    if (birth_date !== undefined) payload.birth_date = birth_date
-    if (notes !== undefined) payload.notes = notes
+    if (memoValue !== undefined) {
+      payload.memo = memoValue
+      payload.notes = memoValue // 기존 notes 컬럼도 같이 유지
+    }
 
     console.log('POST /api/students payload:', payload)
 
@@ -972,10 +1029,18 @@ app.post('/api/students', async (req, res) => {
 
     if (error) {
       console.error('students 추가 에러:', error)
-      return res.status(500).json({ message: '학생 추가 중 오류가 발생했습니다.' })
+      return res
+        .status(500)
+        .json({ message: '학생 추가 중 오류가 발생했습니다.' })
     }
 
-    return res.json(data)
+    const normalized = {
+      ...data,
+      current_status: data.current_status || data.status || null,
+      memo: data.memo || data.notes || null,
+    }
+
+    return res.json(normalized)
   } catch (err) {
     console.error('POST /api/students 서버 오류:', err)
     res.status(500).json({ message: '서버 오류' })
@@ -986,14 +1051,57 @@ app.patch('/api/students/:id', async (req, res) => {
   const { id } = req.params
 
   try {
-    const { name, status, admission_date, birth_date, notes } = req.body || {}
+    const {
+      name,
+      status,
+      current_status,
+      admission_date,
+      birth_date,
+      notes,
+      memo,           // 프론트에서 memo로 보내도 처리
+      school_level,
+      alias,
+      is_active,
+    } = req.body || {}
 
     const updateData = {}
+
     if (name !== undefined) updateData.name = name
-    if (status !== undefined) updateData.status = status
-    if (admission_date !== undefined) updateData.admission_date = admission_date
-    if (birth_date !== undefined) updateData.birth_date = birth_date
-    if (notes !== undefined) updateData.notes = notes
+
+    // 상태 값: current_status > status
+    const statusValue =
+      current_status !== undefined ? current_status : status
+    if (statusValue !== undefined) {
+      updateData.current_status = statusValue
+      updateData.status = statusValue // 기존 컬럼도 같이 변경
+    }
+
+    if (admission_date !== undefined) {
+      updateData.admission_date = admission_date
+    }
+
+    if (birth_date !== undefined) {
+      updateData.birth_date = birth_date
+    }
+
+    // 메모 값: memo > notes
+    const memoValue = memo !== undefined ? memo : notes
+    if (memoValue !== undefined) {
+      updateData.memo = memoValue
+      updateData.notes = memoValue // 기존 notes 컬럼도 같이 유지
+    }
+
+    if (school_level !== undefined) {
+      updateData.school_level = school_level
+    }
+
+    if (alias !== undefined) {
+      updateData.alias = alias
+    }
+
+    if (is_active !== undefined) {
+      updateData.is_active = is_active
+    }
 
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ message: '업데이트할 필드가 없습니다.' })
@@ -1014,7 +1122,13 @@ app.patch('/api/students/:id', async (req, res) => {
       })
     }
 
-    return res.json(data)
+    const normalized = {
+      ...data,
+      current_status: data.current_status || data.status || null,
+      memo: data.memo || data.notes || null,
+    }
+
+    return res.json(normalized)
   } catch (e) {
     console.error('PATCH /api/students/:id 예외:', e)
     return res
@@ -1053,7 +1167,13 @@ app.get('/api/log_entries', async (req, res) => {
     .order('log_date', { ascending: true })
     .range(Number(offset), Number(offset) + Number(limit) - 1)
 
-  if (student_id) {
+  // ✅ "전체" / "ALL" 등은 필터를 적용하지 않음
+  const isAllStudent =
+    student_id === 'ALL' ||
+    student_id === 'all' ||
+    student_id === '전체'
+
+  if (student_id && !isAllStudent) {
     query = query.eq('student_id', student_id)
   }
   if (from) {
@@ -1316,8 +1436,14 @@ app.get('/api/dashboard', async (req, res) => {
         'log_date, emotion_tag, related_metrics, activity_tags, log_content, created_at',
       )
 
-    if (studentId) {
-      query = query.eq('student_id', studentId)
+    const rawStudentId = studentId || null
+    const isAllStudent =
+      rawStudentId === 'ALL' ||
+      rawStudentId === 'all' ||
+      rawStudentId === '전체'
+
+    if (rawStudentId && !isAllStudent) {
+      query = query.eq('student_id', rawStudentId)
     }
     if (fromDate) {
       query = query.gte('log_date', fromDate)
@@ -1477,13 +1603,22 @@ app.post('/api/dashboard/chat', async (req, res) => {
 
   try {
     let logs = []
-    if (studentId && startDate && endDate && typeof supabase !== 'undefined') {
+
+    // ✅ "전체" / "ALL" 값은 특정 학생 필터 없이 조회
+    const isAllStudent =
+      studentId === 'ALL' ||
+      studentId === 'all' ||
+      studentId === '전체'
+
+    const normalizedStudentId = isAllStudent ? null : studentId
+
+    if (normalizedStudentId && startDate && endDate && typeof supabase !== 'undefined') {
       let query = supabase
         .from('log_entries')
         .select(
           'log_date, emotion_tag, related_metrics, activity_tags, log_content, created_at',
         )
-        .eq('student_id', studentId)
+        .eq('student_id', normalizedStudentId)
         .gte('log_date', startDate)
         .lte('log_date', endDate)
 

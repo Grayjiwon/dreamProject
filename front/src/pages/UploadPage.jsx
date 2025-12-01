@@ -66,6 +66,8 @@ import { apiFetch, extractRecordsWithGemini } from '../lib/api.js'
 // -------------------- 업로드 목록 전역 캐시 --------------------
 let uploadsCache = null
 
+const detailDrafts = {}
+
 // -------------------- 헬퍼 / 상수 --------------------
 
 const STEP_DEFS = [
@@ -111,6 +113,55 @@ function normalizeEmotionTags(rawValue) {
       .filter(Boolean)
   }
   return []
+}
+
+// 감정 태그 직렬화(저장용)
+function serializeEmotionTags(rawValue) {
+  if (!rawValue) return []
+  if (Array.isArray(rawValue)) {
+    return rawValue
+      .map(v => {
+        if (!v) return ''
+        if (typeof v === 'string') return v
+        if (typeof v === 'object') {
+          return v.label || v.name || ''
+        }
+        return String(v)
+      })
+      .map(v => v.trim())
+      .filter(Boolean)
+  }
+  if (typeof rawValue === 'string') {
+    return rawValue
+      .split(/[,\s/]+/)
+      .map(v => v.trim())
+      .filter(Boolean)
+  }
+  return []
+}
+
+// 원본 텍스트에서 날짜(YYYY-MM-DD) 후보 추출
+function parseDatesFromText(text) {
+  if (!text || typeof text !== 'string') return []
+  const result = new Set()
+
+  // 예: 2025-11-21, 2025.11.21, 2025/11/21, 2025년 11월 21일
+  const re =
+    /(\d{4})[.\-/년\s]*(\d{1,2})[.\-/월\s]*(\d{1,2})[일]?/g
+
+  let m
+  while ((m = re.exec(text)) !== null) {
+    const year = Number(m[1])
+    const month = Number(m[2])
+    const day = Number(m[3])
+
+    if (!year || month < 1 || month > 12 || day < 1 || day > 31) continue
+    const mm = String(month).padStart(2, '0')
+    const dd = String(day).padStart(2, '0')
+    result.add(`${year}-${mm}-${dd}`)
+  }
+
+  return Array.from(result).sort()
 }
 
 // 분석 필드 정규화
@@ -411,14 +462,6 @@ function getCurrentRawText(detail) {
   return rawByDate[activeDate] || baseRaw
 }
 
-function handleSelectDate(dateStr) {
-  setDetail(prev => ({
-    ...prev,
-    activeDate: dateStr,
-    saved: false,
-  }))
-}
-
 // -------------------- 페이지 컴포넌트 --------------------
 
 export default function UploadPage() {
@@ -445,6 +488,15 @@ export default function UploadPage() {
   // Gemini AI 관련 상태
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState('')
+
+  // 🔹 날짜 탭 선택 (이제 컴포넌트 내부에서 setDetail 사용)
+  const handleSelectDate = dateStr => {
+    setDetail(prev => ({
+      ...prev,
+      activeDate: dateStr,
+      saved: false,
+    }))
+  }
 
   // 업로드 + 캐시 동시 갱신
   function updateUploads(updater) {
@@ -675,6 +727,21 @@ export default function UploadPage() {
   // ---------- 상세보기 모달 초기화 ----------
 
   async function openDetail(upload) {
+    // 1) 먼저 draft 캐시가 있으면 그걸 복원 (API 호출 X)
+    const draft = upload?.id ? detailDrafts[upload.id] : null
+    if (draft) {
+      setAiError('')
+      setStudentPickerOpen(false)
+      setStudentPickerValue('')
+      setDetail({
+        ...draft,
+        open: true,
+        loading: false,
+      })
+      return
+    }
+
+    // 2) 서버에서 최신 데이터 불러오기
     setDetail(createDetailState({ open: true, loading: true }))
     setAiError('')
     setStudentPickerOpen(false)
@@ -692,23 +759,27 @@ export default function UploadPage() {
         hydrated.analysis?.rawTextCleaned ||
         ''
 
-      const serverLogEntries = uploadRes?.log_entries || uploadRes?.entries || []
+      const serverLogEntries =
+        uploadRes?.log_entries || uploadRes?.entries || []
 
       const serverStudents =
-        (uploadRes && (uploadRes.students || uploadRes.student_list || [])) ||
+        (uploadRes &&
+          (uploadRes.students || uploadRes.student_list || [])) ||
         hydrated.analysis?.students ||
         []
-
-      let students = []
-
-      const fromEntries = Array.isArray(serverLogEntries) ? serverLogEntries : []
 
       // 🔹 날짜 / 날짜별 raw text 구성
       const dateSet = new Set()
       const rawTextByDate = {}
 
+      const fromEntries = Array.isArray(serverLogEntries)
+        ? serverLogEntries
+        : []
+
+      // 2-1) log_entries 에 저장된 날짜 기준
       fromEntries.forEach(entry => {
-        const dateValue = entry.log_date || entry.activity_date || entry.date
+        const dateValue =
+          entry.log_date || entry.activity_date || entry.date
         const dateKey = dateValue ? String(dateValue).slice(0, 10) : null
         if (!dateKey) return
 
@@ -728,11 +799,26 @@ export default function UploadPage() {
         }
       })
 
+      // 2-2) 원본 텍스트에서 날짜를 파싱해서 추가 (텍스트에 적힌 날짜로 무조건 탭 생성)
+      const textDates = parseDatesFromText(initialText)
+      textDates.forEach(d => {
+        if (!dateSet.has(d)) {
+          dateSet.add(d)
+          // 날짜별 텍스트가 따로 없으면 일단 전체 텍스트를 기본값으로 연결
+          if (!rawTextByDate[d]) {
+            rawTextByDate[d] = initialText
+          }
+        }
+      })
+
       const dates = Array.from(dateSet).sort()
       const activeDate = dates[0] || null
 
+      // 🔹 학생 목록 구성 (log_entries + 서버가 내려준 students 기반)
       const entryStudents = fromEntries.map((entry, idx) => ({
-        id: String(entry.student_id || entry.student?.id || `stu-entry-${idx + 1}`),
+        id: String(
+          entry.student_id || entry.student?.id || `stu-entry-${idx + 1}`,
+        ),
         name:
           entry.student_name ||
           entry.student?.name ||
@@ -741,20 +827,27 @@ export default function UploadPage() {
 
       const explicitStudents = Array.isArray(serverStudents)
         ? serverStudents.map((s, idx) => ({
-            id: String(s.id || s.student_id || s.uuid || s.key || `stu-${idx + 1}`),
-            name: s.name || s.student_name || s.realName || s.label || `학생 ${idx + 1}`,
+            id: String(
+              s.id ||
+                s.student_id ||
+                s.uuid ||
+                s.key ||
+                `stu-${idx + 1}`,
+            ),
+            name:
+              s.name ||
+              s.student_name ||
+              s.realName ||
+              s.label ||
+              `학생 ${idx + 1}`,
           }))
         : []
 
+      let students = []
       if (entryStudents.length === 0 && explicitStudents.length === 0) {
-        const fallbackName = hydrated.student_name || '학생'
-        const fallbackId = hydrated.student_id || hydrated.student?.id || 'stu-1'
-        students = [
-          {
-            id: String(fallbackId),
-            name: fallbackName,
-          },
-        ]
+        // 🔸 더 이상 "학생 미확인" 같은 기본 탭을 만들지 않는다.
+        //     → AI 분석 또는 "학생 추가" 버튼으로만 학생 탭이 생김
+        students = []
       } else {
         const map = new Map()
         ;[...explicitStudents, ...entryStudents].forEach(stu => {
@@ -765,16 +858,21 @@ export default function UploadPage() {
         students = Array.from(map.values())
       }
 
+      // 🔹 학생별 분석 정보 재구성
       const analysisByStudent = {}
 
       if (fromEntries.length > 0) {
         fromEntries.forEach(entry => {
-          const stuId = String(entry.student_id || entry.student?.id || students[0]?.id)
+          const stuId = String(
+            entry.student_id || entry.student?.id || students[0]?.id,
+          )
           if (!stuId) return
 
           const normalized = normalizeAnalysis(entry)
 
-          const activityTags = Array.isArray(entry.activity_tags) ? entry.activity_tags : []
+          const activityTags = Array.isArray(entry.activity_tags)
+            ? entry.activity_tags
+            : []
           const activityTypesFromTags = {}
           activityTags.forEach(tagLabel => {
             const key = Object.keys(ACTIVITY_TYPE_PRESETS).find(
@@ -798,6 +896,7 @@ export default function UploadPage() {
         })
       }
 
+      // log_entries 기반 정보가 없으면, 업로드 기본 분석값으로 초기화
       if (Object.keys(analysisByStudent).length === 0) {
         const base = hydrated.analysis || {}
         students.forEach(stu => {
@@ -805,7 +904,8 @@ export default function UploadPage() {
             analysis: { ...base },
             activityTypes: buildActivityTypeState(
               uploadRes?.activity_types || uploadRes?.activityTypes,
-              uploadRes?.activity_type_details || uploadRes?.activityTypeDetails,
+              uploadRes?.activity_type_details ||
+                uploadRes?.activityTypeDetails,
             ),
           }
         })
@@ -814,7 +914,8 @@ export default function UploadPage() {
       const activeStudentId =
         uploadRes?.activeStudentId ||
         uploadRes?.active_student_id ||
-        (students[0] && students[0].id)
+        (students[0] && students[0].id) ||
+        null
 
       setDetail(
         createDetailState({
@@ -830,6 +931,7 @@ export default function UploadPage() {
           analysisByStudent,
         }),
       )
+
       // 텍스트를 불러온 시점에서 "텍스트 추출" 단계 완료로 간주
       if (initialText && initialText.trim()) {
         updateUploadSteps(hydrated.id, prevSteps => ({
@@ -844,24 +946,18 @@ export default function UploadPage() {
       const initialText =
         hydrated.raw_text || hydrated.analysis?.rawTextCleaned || ''
 
-      const fallbackName = hydrated.student_name || '학생'
-      const fallbackId = hydrated.student_id || hydrated.student?.id || 'stu-1'
+      // 🔹 실패 시에도 텍스트에서 날짜를 추출해서 탭 생성
+      const textDates = parseDatesFromText(initialText)
+      const dates = textDates
+      const activeDate = dates[0] || null
+      const rawTextByDate = {}
+      dates.forEach(d => {
+        rawTextByDate[d] = initialText
+      })
 
-      const students = [
-        {
-          id: String(fallbackId),
-          name: fallbackName,
-        },
-      ]
-
-      const base = hydrated.analysis || {}
-
-      const analysisByStudent = {
-        [String(fallbackId)]: {
-          analysis: { ...base },
-          activityTypes: buildActivityTypeState(),
-        },
-      }
+      // 기본 학생 탭은 만들지 않는다. (학생은 수동 추가 또는 AI 분석으로 생성)
+      const students = []
+      const analysisByStudent = {}
 
       setDetail(
         createDetailState({
@@ -869,9 +965,14 @@ export default function UploadPage() {
           loading: false,
           upload: hydrated,
           editedText: initialText,
-          error: '상세 정보를 불러오지 못했습니다. 기본 정보만 표시합니다.',
+          dates,
+          activeDate,
+          rawTextByDate,
           students,
-          activeStudentId: String(fallbackId),
+          activeStudentId: null,
+          analysisByStudent,
+          error:
+            '상세 정보를 불러오지 못했습니다. 텍스트만 편집 가능합니다.',
         }),
       )
       if (initialText && initialText.trim()) {
@@ -884,10 +985,21 @@ export default function UploadPage() {
   }
 
   function closeDetail() {
-    setDetail(createDetailState())
     setAiError('')
     setStudentPickerOpen(false)
     setStudentPickerValue('')
+
+    // 🔹 현재 편집 상태를 draft 캐시에 저장 (업로드별)
+    setDetail(prev => {
+      if (prev.upload && prev.upload.id) {
+        detailDrafts[prev.upload.id] = {
+          ...prev,
+          open: false,
+          loading: false,
+        }
+      }
+      return createDetailState()
+    })
   }
 
   // ---------- 학생 탭 ----------
@@ -1427,28 +1539,34 @@ async function handleRunAiExtraction() {
       return
     }
 
- const baseRawText =
-    (detail.editedText && detail.editedText.trim()) ||
-    detail.upload.raw_text ||
-    detail.upload.analysis?.rawTextCleaned ||
-    ''
+    const baseRawText =
+      (detail.editedText && detail.editedText.trim()) ||
+      detail.upload.raw_text ||
+      detail.upload.analysis?.rawTextCleaned ||
+      ''
 
-  const dates = detail.dates || []
-  const rawByDate = detail.rawTextByDate || {}
-  const hasDateTabs = dates.length > 0
+    const dates = detail.dates || []
+    const rawByDate = detail.rawTextByDate || {}
+    const hasDateTabs = dates.length > 0
 
-  const todayStr = new Date().toISOString().slice(0, 10)
+    const todayStr = new Date().toISOString().slice(0, 10)
 
-  const logEntries = (detail.students || []).map(stu => {
-    const state = detail.analysisByStudent?.[stu.id] || {}
-    const analysis = state.analysis || {}
-    const activityTypes = state.activityTypes || buildActivityTypeState()
+    const logEntries = (detail.students || []).map(stu => {
+      const state =
+        detail.analysisByStudent?.[stu.id] || {
+          analysis: {},
+          activityTypes: buildActivityTypeState(),
+        }
+      const analysis = state.analysis || {}
+      const activityTypes =
+        state.activityTypes || buildActivityTypeState()
 
       const selectedActivityLabels = Object.entries(activityTypes)
         .filter(([, item]) => item.selected)
         .map(([, item]) => item.label || '')
         .filter(Boolean)
 
+      // 감정 태그 직렬화
       const emotionTags = serializeEmotionTags(analysis.emotionTags)
 
       const { hours, minutes } = splitDuration(analysis.durationMinutes)
@@ -1462,10 +1580,18 @@ async function handleRunAiExtraction() {
         detail.upload?.uploaded_at ||
         detail.upload?.created_at ||
         todayStr
-      
+
       const dateKey = logDate ? String(logDate).slice(0, 10) : null
+
+      // 🔹 날짜 탭이 있으면 해당 날짜 텍스트 사용, 없으면 전체 텍스트 사용
       const logContent =
-      (hasDateTabs && dateKey && rawByDate[dateKey]) || baseRawText
+        (hasDateTabs && dateKey && rawByDate[dateKey]) || baseRawText
+
+      // 🔹 대표 감정: emotionSummary > emotionTags[0]
+      const primaryEmotion =
+        (analysis.emotionSummary &&
+          analysis.emotionSummary.trim()) ||
+        (emotionTags[0] || '')
 
       const relatedMetrics = {
         duration_minutes: durationMinutes || null,
@@ -1473,11 +1599,17 @@ async function handleRunAiExtraction() {
         activity_type: analysis.activityType || '',
         note: analysis.note || '',
         level: analysis.level || '',
-        ability: Array.isArray(analysis.ability) ? analysis.ability : [],
-        score: typeof analysis.score === 'number' ? analysis.score : null,
+        ability: Array.isArray(analysis.ability)
+          ? analysis.ability
+          : [],
+        score:
+          typeof analysis.score === 'number'
+            ? analysis.score
+            : null,
         score_explanation: analysis.scoreExplanation || '',
         emotionTags,
-        emotionSummary: analysis.emotionSummary || '',
+        // Dashboard / 상세 재로딩 시 동일한 대표 감정을 사용
+        emotionSummary: primaryEmotion || '',
         isAiGenerated: !!analysis.isAiGenerated,
       }
 
@@ -1485,14 +1617,16 @@ async function handleRunAiExtraction() {
         student_id: stu.id,
         student_name: stu.name,
         log_date: logDate,
-        emotion_tag: analysis.emotionSummary || '',
+        // Dashboard 집계용 대표 감정
+        emotion_tag: primaryEmotion || '',
+        // 전체 감정 배열 (서버에서 metrics[0].emotion_tags 로도 보관)
         emotion_tags: emotionTags,
         activity_tags: selectedActivityLabels,
-        // 🔹 날짜별 텍스트 저장
         log_content: logContent,
         related_metrics: relatedMetrics,
       }
     })
+
     const payload = {
       upload_id: detail.upload.id,
       file_name: detail.upload.file_name,
@@ -1501,9 +1635,11 @@ async function handleRunAiExtraction() {
     }
 
     try {
+      const uploadId = detail.upload.id
+
       setDetail(prev => ({ ...prev, saving: true }))
 
-      await apiFetch(`/uploads/${detail.upload.id}/log`, {
+      await apiFetch(`/uploads/${uploadId}/log`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1511,30 +1647,40 @@ async function handleRunAiExtraction() {
         body: JSON.stringify(payload),
       })
 
+      // 저장이 끝났으므로 draft 캐시는 제거 (다음에는 DB 기준으로 열림)
+      if (uploadId && detailDrafts[uploadId]) {
+        delete detailDrafts[uploadId]
+      }
+
+      // detail 상태 갱신
       setDetail(prev => ({
         ...prev,
         saving: false,
         saved: true,
         upload: {
           ...prev.upload,
-          raw_text: rawText,
+          raw_text: baseRawText,
           log_entries: logEntries,
         },
       }))
+
+      // 업로드 카드 정보도 갱신
       updateUploads(prev =>
         prev.map(item => {
-          if (item.id !== detail.upload.id) return item
+          if (item.id !== uploadId) return item
           const firstEntry = logEntries[0]
           return {
             ...item,
-            raw_text: rawText,
-            student_name: firstEntry?.student_name || item.student_name,
+            raw_text: baseRawText,
+            student_name:
+              firstEntry?.student_name || item.student_name,
             analysis: {
               ...(item.analysis || {}),
               date: firstEntry?.log_date,
               emotionSummary: firstEntry?.emotion_tag,
               activityType:
-                firstEntry?.activity_tags?.[0] || item.analysis?.activityType,
+                firstEntry?.activity_tags?.[0] ||
+                item.analysis?.activityType,
             },
             // 3개 과정(텍스트 추출, AI 분석, DB 저장)이 모두 끝난 상태로 표시
             status: 'success',
@@ -1546,12 +1692,14 @@ async function handleRunAiExtraction() {
               extract: 100,
               ocr: 100,
               sentiment: 100,
+              ai: 100,
+              save: 100,
             },
           }
         }),
       )
 
-      alert('데이터가 데이터베이스(log_entries) 구조에 맞게 저장되었습니다.')
+      alert('데이터가 데이터베이스(log_entries)에 저장되었습니다.')
     } catch (e) {
       console.error(e)
       setDetail(prev => ({ ...prev, saving: false, saved: false }))
