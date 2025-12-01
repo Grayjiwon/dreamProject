@@ -66,6 +66,15 @@ function normalizeActivityAbilityList(src) {
   }))
 }
 
+// 날짜 → YYYY-MM-DD
+function formatDateInput(date) {
+  if (!date || Number.isNaN(date.getTime())) return ''
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
 // ---------- 메인 컴포넌트 ----------
 
 export default function Dashboard() {
@@ -138,13 +147,10 @@ export default function Dashboard() {
   }, [emotionDetailList])
 
   // 감정 점수(0~10) + Top5
-  // → 감정 분포(emotionDistribution)를 count 기준으로 정렬해서
-  //    해당 기간 동안 "가장 많이 느낀 감정 Top 5"를 보여준다.
   const emotionScaleItems = useMemo(() => {
     if (!emotionChartData.length) return []
 
-    // 서버에서 이미 count 기준으로 정렬되어 오지만,
-    // 혹시 모를 경우를 위해 한 번 더 정렬
+    // count 기준으로 상위 5개 감정
     const top = emotionChartData
       .slice()
       .sort((a, b) => (b.count || 0) - (a.count || 0))
@@ -186,8 +192,6 @@ export default function Dashboard() {
   }, [emotionChartData, emotionDetailsByName])
 
   // 감정 상세 모달용 데이터
-  // 서버에서 내려준 count(실제 횟수)를 그대로 사용해서
-  // "해당 기간 동안 이 감정을 몇 회 느꼈는지"를 보여준다.
   const emotionDetailRows = useMemo(() => {
     if (!emotionChartData.length) return []
 
@@ -203,7 +207,7 @@ export default function Dashboard() {
     })
   }, [emotionChartData, recordCount])
 
-  // 활동별 대표 감정 카드
+  // 활동별 대표 감정 카드 (대시보드 메인 카드)
   const activityEmotionCards = useMemo(() => {
     if (!abilityList.length || !emotionScaleItems.length) return []
     const icons = ['🧺', '🌱', '🧹', '🔍']
@@ -215,7 +219,7 @@ export default function Dashboard() {
         icon: icons[idx % icons.length],
         activity: act.activity,
         emotion: emo?.name ?? '감정',
-        emotionCount: emo?.count ?? 0, // 👈 점수 대신 횟수
+        emotionCount: emo?.count ?? 0,
         description: act.date ? `${act.date} 활동` : '',
       }
     })
@@ -238,7 +242,6 @@ export default function Dashboard() {
       return `${queriedStudentLabel} 학생의 활동별 감정 데이터가 아직 충분하지 않습니다.`
     }
 
-    // emotionCount 기준으로 가장 자주 등장한 활동 선택
     const sorted = [...activityEmotionCards].sort(
       (a, b) => (b.emotionCount || 0) - (a.emotionCount || 0),
     )
@@ -339,10 +342,21 @@ export default function Dashboard() {
       setQueriedStudent(qStudent)
       setQueriedStartDate(startDate)
       setQueriedEndDate(endDate)
+
+      // 첫 조회 시 채팅 인트로 메시지 없으면 생성
+      if (!chatMessages.length && qStudent) {
+        setChatMessages([
+          {
+            id: 'intro',
+            role: 'assistant',
+            content: `${qStudent.name} 학생의 ${startDate} ~ ${endDate} 기록을 기반으로 대화를 도와드릴게요.\n무엇이 궁금하신가요?`,
+          },
+        ])
+      }
     } catch (e) {
       console.error(e)
       setError(e.message || '대시보드 조회 중 오류가 발생했습니다.')
-      setMetrics({ recordCount: 0})
+      setMetrics({ recordCount: 0 })
       setEmotionData([])
       setEmotionDetails([])
       setActivitySeries([])
@@ -355,6 +369,20 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchStudents()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 페이지 초기 진입 시 기간 기본값을 "최근 1개월"로 세팅
+  useEffect(() => {
+    if (!startDate && !endDate) {
+      const today = new Date()
+      const end = formatDateInput(today)
+      const start = new Date(today)
+      start.setMonth(start.getMonth() - 1)
+      const startStr = formatDateInput(start)
+      setStartDate(startStr)
+      setEndDate(end)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -382,30 +410,9 @@ export default function Dashboard() {
     })
   }
 
-  // 채팅 토글
   function handleOpenChat() {
-    if (isChatOpen) {
-      setIsChatOpen(false)
-      return
-    }
-
-    if (!queriedStudent || !queriedStartDate || !queriedEndDate) {
-      alert('먼저 학생과 기간을 선택해 검색을 완료한 뒤에 채팅을 사용할 수 있습니다.')
-      return
-    }
-
-    setChatError(null)
     setIsChatOpen(true)
-
-    if (!chatMessages.length) {
-      setChatMessages([
-        {
-          id: 'intro',
-          role: 'assistant',
-          content: `${queriedStudent.name} 학생의 ${queriedStartDate} ~ ${queriedEndDate} 기록을 기반으로 대화를 도와드릴게요.\n무엇이 궁금하신가요?`,
-        },
-      ])
-    }
+    setChatError(null)
   }
 
   function handleCloseChat() {
@@ -499,7 +506,7 @@ export default function Dashboard() {
           )}
 
           {/* 상단: 학생 선택 + 기간 선택 */}
-          <section className="dashboard-filter-card">
+          <section className="dashboard-card wide-card dashboard-filter-card">
             <div className="dashboard-filter-grid">
               {/* 왼쪽: 학생 패널 */}
               <div className="filter-student-panel">
@@ -513,7 +520,9 @@ export default function Dashboard() {
                       <select
                         className="student-select"
                         value={selectedStudentId}
-                        onChange={e => setSelectedStudentId(e.target.value)}
+                        onChange={e =>
+                          setSelectedStudentId(e.target.value)
+                        }
                       >
                         <option value="">학생 선택</option>
                         {students.map(s => (
@@ -557,62 +566,64 @@ export default function Dashboard() {
               </div>
 
               {/* 오른쪽: 기간 선택 패널 */}
-              <form className="filter-calendar-panel" onSubmit={handleSearch}>
-                <div className="calendar-card-header">
-                  <div>
-                    <div className="card-title">기간 선택</div>
-                    <div className="muted" style={{ fontSize: 13 }}>
-                      조회할 날짜 범위를 선택한 뒤 검색을 눌러주세요.
+              <div className="filter-calendar-panel">
+                <form className="calendar-panel" onSubmit={handleSearch}>
+                  <div className="calendar-card-header">
+                    <div>
+                      <div className="card-title">기간 선택</div>
+                      <div className="muted" style={{ fontSize: 13 }}>
+                        조회할 날짜 범위를 선택한 뒤 검색을 눌러주세요.
+                      </div>
+                    </div>
+                    <span className="calendar-icon">📅</span>
+                  </div>
+
+                  <div className="calendar-fields">
+                    <div className="calendar-field">
+                      <label>시작일</label>
+                      <input
+                        type="date"
+                        value={startDate}
+                        max={endDate || undefined}
+                        onChange={e => setStartDate(e.target.value)}
+                      />
+                    </div>
+                    <div className="calendar-field">
+                      <label>종료일</label>
+                      <input
+                        type="date"
+                        value={endDate}
+                        min={startDate || undefined}
+                        onChange={e => setEndDate(e.target.value)}
+                      />
                     </div>
                   </div>
-                  <span className="calendar-icon">📅</span>
-                </div>
 
-                <div className="calendar-fields">
-                  <div className="calendar-field">
-                    <label>시작일</label>
-                    <input
-                      type="date"
-                      value={startDate}
-                      max={endDate || undefined}
-                      onChange={e => setStartDate(e.target.value)}
-                    />
-                  </div>
-                  <div className="calendar-field">
-                    <label>종료일</label>
-                    <input
-                      type="date"
-                      value={endDate}
-                      min={startDate || undefined}
-                      onChange={e => setEndDate(e.target.value)}
-                    />
-                  </div>
-                </div>
+                  {isInvalidRange && (
+                    <div
+                      className="muted"
+                      style={{
+                        fontSize: 12,
+                        color: '#EF4444',
+                        marginTop: 4,
+                      }}
+                    >
+                      시작일이 종료일보다 늦을 수 없습니다. 날짜를 다시
+                      선택해 주세요.
+                    </div>
+                  )}
 
-                {isInvalidRange && (
-                  <div
-                    className="muted"
-                    style={{
-                      fontSize: 12,
-                      color: '#EF4444',
-                      marginTop: 4,
-                    }}
-                  >
-                    시작일이 종료일보다 늦을 수 없습니다. 날짜를 다시 선택해
-                    주세요.
+                  <div className="calendar-actions">
+                    <button
+                      type="submit"
+                      className="btn"
+                      disabled={!selectedStudentId}
+                    >
+                      검색
+                    </button>
                   </div>
-                )}
-
-                <div className="calendar-actions">
-                  <button
-                    type="submit"
-                    className="btn"
-                    disabled={!selectedStudentId}
-                  >
-                    검색
-                  </button>
-                </div>
-              </form>
+                </form>
+              </div>
             </div>
           </section>
 
@@ -639,7 +650,7 @@ export default function Dashboard() {
             </div>
 
             <div className="emotion-scale-section">
-                            <div className="emotion-scale-section-title">
+              <div className="emotion-scale-section-title">
                 가장 많이 느낀 감정 Top 5
               </div>
               {emotionScaleItems.length === 0 ? (
@@ -687,7 +698,9 @@ export default function Dashboard() {
                 {activityEmotionCards.map(card => (
                   <div key={card.id} className="activity-emotion-card">
                     <div className="activity-emotion-card-top">
-                      <div className="activity-emotion-icon">{card.icon}</div>
+                      <div className="activity-emotion-icon">
+                        {card.icon}
+                      </div>
                       <div>
                         <div className="activity-emotion-activity">
                           {card.activity}
@@ -728,7 +741,8 @@ export default function Dashboard() {
               <div>
                 <div className="card-title">활동 유형 분포</div>
                 <div className="muted" style={{ fontSize: 13 }}>
-                  선택한 기간 동안 기록된 활동 시간을 날짜별로 살펴볼 수 있어요.
+                  선택한 기간 동안 기록된 활동 시간을 날짜별로
+                  살펴볼 수 있어요.
                 </div>
               </div>
               <button
@@ -756,7 +770,9 @@ export default function Dashboard() {
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="date" />
                   <YAxis unit="분" />
-                  <Tooltip formatter={value => [`${value}분`, '활동 시간']} />
+                  <Tooltip
+                    formatter={value => [`${value}분`, '활동 시간']}
+                  />
                   <Bar
                     dataKey="minutes"
                     fill="#3b82f6"
@@ -794,7 +810,9 @@ export default function Dashboard() {
                 abilityList.map(item => (
                   <div key={item.id} className="ability-table-row">
                     <div className="col-activity">
-                      <div className="activity-name">{item.activity}</div>
+                      <div className="activity-name">
+                        {item.activity}
+                      </div>
                       <div className="activity-date muted">
                         {item.date}
                       </div>
@@ -819,7 +837,9 @@ export default function Dashboard() {
                       <div className="ability-bar">
                         <span
                           className="bar-seg bar-hard"
-                          style={{ width: `${item.difficultyRatio}%` }}
+                          style={{
+                            width: `${item.difficultyRatio}%`,
+                          }}
                         />
                         <span
                           className="bar-seg bar-normal"
@@ -867,7 +887,9 @@ export default function Dashboard() {
               <div className="ability-summary-card summary-good">
                 <div className="summary-title">우수 활동</div>
                 <div className="summary-main">{goodCount}개</div>
-                <div className="summary-sub">안정적으로 수행한 활동</div>
+                <div className="summary-sub">
+                  안정적으로 수행한 활동
+                </div>
               </div>
               <div className="ability-summary-card summary-challenge">
                 <div className="summary-title">도전적 활동</div>
@@ -879,343 +901,260 @@ export default function Dashboard() {
             </div>
           </section>
         </div>
-      </div>
 
-      {/* 감정 상세 모달 */}
-      {emotionModalOpen && (
-        <div
-          className="modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setEmotionModalOpen(false)}
-        >
+        {/* 감정 상세보기 모달 */}
+        {emotionModalOpen && (
           <div
-            className="modal-card emotion-detail-modal"
-            onClick={e => e.stopPropagation()}
+            className="modal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            onClick={() => setEmotionModalOpen(false)}
           >
-            <button
-              className="modal-close"
-              aria-label="닫기"
-              type="button"
-              onClick={() => setEmotionModalOpen(false)}
+            <div
+              className="modal-card emotion-detail-modal"
+              onClick={e => e.stopPropagation()}
             >
-              ✕
-            </button>
+              <button
+                className="modal-close"
+                aria-label="닫기"
+                type="button"
+                onClick={() => setEmotionModalOpen(false)}
+              >
+                ✕
+              </button>
 
-            <div className="emotion-detail-header">
-              <div>
-                <div className="emotion-detail-title">
-                  🧠 감정 키워드 상세보기
+              <div className="emotion-detail-header">
+                <div>
+                  <div className="emotion-detail-title">
+                    🧠 감정 키워드 상세보기
+                  </div>
+                  <p className="muted">
+                    {queriedStudentLabel} 학생의 감정을 감정별 빈도, 대표 활동과
+                    함께 확인할 수 있습니다.
+                  </p>
                 </div>
-                <p className="muted">
-                  {queriedStudentLabel} 학생의 선택 기간 감정 키워드와
-                  활동별 감정 척도를 한눈에 볼 수 있는 화면입니다.
-                </p>
               </div>
-              <div className="emotion-detail-badge">
-                총 {emotionScaleItems.length}개 키워드
-              </div>
-            </div>
 
-                        <div className="emotion-detail-scroll">
-              {/* 1) 전체 평균 감정 척도 카드 */}
-              <section className="emotion-detail-section">
-                <h4 className="emotion-detail-section-title">
-                  전체 평균 감정 척도
-                </h4>
-                {emotionScaleItems.length === 0 ? (
-                  <div className="muted">감정 데이터가 아직 없습니다.</div>
-                ) : (
-                  <div className="emotion-detail-grid">
-                    {emotionScaleItems.map(item => {
-                      const row = emotionDetailRows.find(
-                        r => r.type === item.name,
-                      )
-                      const count = row?.count ?? 0
-                      const ratio = row?.ratio ?? 0
-                      return (
-                        <div
-                          key={item.name}
-                          className="emotion-detail-card"
-                        >
-                          <div className="emotion-detail-card-header">
-                            <div className="emotion-detail-name">
-                              {item.name}
-                            </div>
-                            <div className="emotion-detail-count-pill">
-                              {count}회
-                            </div>
-                          </div>
-                          <div className="emotion-detail-score-row">
-                            <span className="emotion-detail-label">
-                              전체 대비
-                            </span>
-                            <span className="emotion-detail-score">
-                              {ratio}%
-                            </span>
-                          </div>
-                          {row?.desc && (
-                            <div className="emotion-detail-desc-text">
-                              {row.desc}
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </section>
+              <div className="emotion-detail-scroll">
+                {/* 1) 전체 평균 감정 척도 카드 */}
+                <section className="emotion-detail-section">
+                  <h4 className="emotion-detail-section-title">
+                    전체 평균 감정 척도
+                  </h4>
+                  {emotionScaleItems.length === 0 ? (
+                    <div className="muted">
+                      감정 데이터가 아직 없습니다.
+                    </div>
+                  ) : (
+                    <div className="emotion-detail-grid">
+                      {emotionScaleItems.map(item => {
+                        const row = emotionDetailRows.find(
+                          r => r.type === item.name,
+                        )
+                        const ratio = row?.ratio ?? 0
+                        const count = item.totalCount ?? item.count ?? 0
 
-              {/* 2) 감정별 날짜/활동 내역 */}
-              <section className="emotion-detail-section">
-                <h4 className="emotion-detail-section-title">
-                  감정별 날짜/활동 내역
-                </h4>
-                {emotionDetailList.length === 0 ? (
-                  <div className="muted">
-                    감정별 날짜/활동 데이터가 아직 없습니다.
-                  </div>
-                ) : (
-                  <div className="emotion-timeline-grid">
-                    {emotionDetailList.map(detail => (
-                      <div
-                        key={detail.emotion}
-                        className="emotion-timeline-card"
-                      >
-                        <div className="emotion-timeline-header">
-                          <span className="emotion-detail-name">
-                            {detail.emotion}
-                          </span>
-                          <span className="emotion-detail-count-pill">
-                            총 {detail.totalCount}회
-                          </span>
-                        </div>
-                        <div className="emotion-timeline-list">
-                          {detail.items.map(item => (
-                            <div
-                              key={`${detail.emotion}-${item.date}`}
-                              className="emotion-timeline-row"
-                            >
-                              <div className="emotion-timeline-date">
-                                {item.date}
+                        return (
+                          <div
+                            key={item.name}
+                            className="emotion-detail-card"
+                          >
+                            <div className="emotion-detail-card-header">
+                              <div className="emotion-detail-name">
+                                {item.name}
                               </div>
-                              <div className="emotion-timeline-count">
-                                {item.count}회
-                              </div>
-                              <div className="emotion-timeline-activities">
-                                {item.activities && item.activities.length
-                                  ? item.activities.join(', ')
-                                  : '-'}
+                              <div className="emotion-detail-count-pill">
+                                {count}회
                               </div>
                             </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              {/* 3) 전체 분석 요약 */}
-              <section className="emotion-detail-section">
-                <h4 className="emotion-detail-section-title">
-                  전체 분석 요약
-                </h4>
-                <div className="emotion-detail-summary-text">
-                  {emotionSummaryText}
-                </div>
-              </section>
-
-              {/* 4) 활동별 감정 척도 */}
-              <section className="emotion-detail-section">
-                <h4 className="emotion-detail-section-title">
-                  활동별 감정 척도
-                </h4>
-                {activityEmotionCards.length === 0 ? (
-                  <div className="activity-detail-empty">
-                    활동별 감정 데이터가 충분하지 않습니다.
-                  </div>
-                ) : (
-                  <div className="activity-emotion-detail-grid">
-                    {activityEmotionCards.map(card => (
-                      <div
-                        key={card.id}
-                        className="activity-emotion-detail-card"
-                      >
-                        <div className="activity-emotion-detail-top">
-                          <div className="activity-emotion-detail-icon">
-                            {card.icon}
-                          </div>
-                          <div>
-                            <div className="activity-emotion-detail-activity">
-                              {card.activity}
+                            <div className="emotion-detail-score-row">
+                              <span className="emotion-detail-score">
+                                {item.score10.toFixed(1)}점
+                              </span>
+                              <span className="emotion-detail-ratio">
+                                전체 대비 {ratio}%
+                              </span>
                             </div>
-                            {card.description && (
-                              <div className="activity-emotion-detail-sub muted">
-                                {card.description}
+                            <div className="emotion-detail-bar">
+                              <div
+                                className="emotion-detail-bar-inner"
+                                style={{
+                                  width: `${(item.score10 / 10) * 100}%`,
+                                }}
+                              />
+                            </div>
+                            {item.topActivities?.length > 0 && (
+                              <div className="emotion-detail-activities">
+                                <span className="emotion-detail-label">
+                                  자주 함께 나타난 활동
+                                </span>
+                                <div className="emotion-detail-chips">
+                                  {item.topActivities.map(act => (
+                                    <span
+                                      key={act}
+                                      className="emotion-activity-chip"
+                                    >
+                                      {act}
+                                    </span>
+                                  ))}
+                                </div>
                               </div>
                             )}
                           </div>
-                        </div>
-                        <div className="activity-emotion-detail-row">
-                          <span className="activity-emotion-detail-label">
-                            {card.emotion}
-                          </span>
-                          {card.emotionCount != null && (
-                            <span className="activity-emotion-detail-score">
-                              {card.emotionCount}회
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
+                        )
+                      })}
+                    </div>
+                  )}
+                </section>
 
-              {/* 5) 활동별 감정 분석 요약 */}
-              <section className="emotion-detail-section">
-                <h4 className="emotion-detail-section-title">
-                  활동별 감정 분석
-                </h4>
-                <div className="emotion-detail-summary-text">
-                  {activityEmotionSummaryText}
-                </div>
-              </section>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 활동 유형 분포 상세 모달 */}
-      {activityModalOpen && (
-        <div
-          className="modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setActivityModalOpen(false)}
-        >
-          <div
-            className="modal-card activity-detail-modal"
-            onClick={e => e.stopPropagation()}
-          >
-            <button
-              className="modal-close"
-              aria-label="닫기"
-              type="button"
-              onClick={() => setActivityModalOpen(false)}
-            >
-              ✕
-            </button>
-
-            <div className="activity-detail-header">
-              <div>
-                <div className="activity-detail-title">
-                  📊 활동 유형 분포
-                </div>
-                <div className="activity-detail-subtitle">
-                  <div className="muted">활동 상세 내역</div>
-                  <div className="activity-detail-student">
-                    {queriedStudentLabel}의 일자별 활동 기록
-                    {queriedStartDate && queriedEndDate
-                      ? ` (${queriedStartDate} ~ ${queriedEndDate})`
-                      : ''}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="activity-detail-scroll">
-              <section className="activity-detail-section">
-                <div className="activity-detail-table">
-                  <div className="activity-detail-table-head">
-                    <div>날짜</div>
-                    <div>활동</div>
-                    <div>감정</div> 
-                    <div>유형</div>
-                    <div>활동 유형</div>
-                    <div>학생 코멘트</div>
-                  </div>
-
-                  {activityDetailRows.length === 0 ? (
-                    <div className="activity-detail-empty">
-                      선택한 기간에 대한 활동 데이터가 충분하지 않습니다.
+                {/* 2) 감정 타입별 통계 테이블 */}
+                <section className="emotion-detail-section">
+                  <h4 className="emotion-detail-section-title">
+                    감정별 통계
+                  </h4>
+                  {emotionDetailRows.length === 0 ? (
+                    <div className="muted">
+                      감정 데이터가 아직 없습니다.
                     </div>
                   ) : (
-                    activityDetailRows.map((row, idx) => (
-                      <div
-                        key={`${row.date}-${row.activity}-${idx}`}
-                        className="activity-detail-row"
-                      >
-                        <div>{row.date}</div>
-                        <div>{row.activity}</div>
-                        <div>
-                          {row.emotion && (
-                            <span className="emotion-chip">
-                              {row.emotion}
-                            </span>
-                          )}
-                        </div>
-                        <div>
-                          {row.category && (
-                            <span className="skill-chip">
-                              {row.category}
-                            </span>
-                          )}
-                        </div>
-                        <div>
-                          {row.activityType && (
-                            <span className="skill-chip">
-                              {row.activityType}
-                            </span>
-                          )}
-                        </div>
-                        <div className="activity-detail-comment">
-                          {row.comment || '-'}
-                        </div>
+                    <div className="emotion-detail-table">
+                      <div className="emotion-detail-table-header">
+                        <div className="col-type">감정</div>
+                        <div className="col-ratio">비율</div>
+                        <div className="col-count">횟수</div>
+                        <div className="col-desc">설명</div>
                       </div>
-                    ))
+                      {emotionDetailRows.map(row => (
+                        <div
+                          key={row.type}
+                          className="emotion-detail-table-row"
+                        >
+                          <div className="col-type">{row.type}</div>
+                          <div className="col-ratio">{row.ratio}%</div>
+                          <div className="col-count">{row.count}회</div>
+                          <div className="col-desc">{row.desc}</div>
+                        </div>
+                      ))}
+                    </div>
                   )}
-                </div>
-              </section>
+                </section>
 
-              <section className="activity-detail-section">
-                <div className="activity-detail-summary-grid">
-                  <div className="ability-summary-card summary-excellent">
-                    <div className="summary-title">총 활동 횟수</div>
-                    <div className="summary-main">
-                      {activityStats.total}
-                      <span className="summary-sub">회</span>
-                    </div>
+                {/* 3) 요약 문단 */}
+                <section className="emotion-detail-section">
+                  <h4 className="emotion-detail-section-title">
+                    감정 분석 요약
+                  </h4>
+                  <div className="emotion-analysis-box">
+                    {emotionSummaryText}
                   </div>
-                  <div className="ability-summary-card summary-good">
-                    <div className="summary-title">가장 많은 활동</div>
-                    <div className="summary-main">
-                      {activityStats.mostActive || '-'}
-                    </div>
-                  </div>
-                  <div className="ability-summary-card summary-challenge">
-                    <div className="summary-title">활동 유형 수</div>
-                    <div className="summary-main">
-                      {activityStats.typeCount}
-                      <span className="summary-sub">가지</span>
-                    </div>
-                  </div>
-                </div>
-              </section>
+                </section>
 
-              <section className="activity-detail-section">
-                <h4 className="activity-detail-section-title">
-                  활동 분석 요약
-                </h4>
-                <div className="activity-analysis-box">
-                  {activityDetailSummaryText}
-                </div>
-              </section>
+                {/* 4) 활동별 대표 감정 요약 */}
+                <section className="emotion-detail-section">
+                  <h4 className="emotion-detail-section-title">
+                    활동별 대표 감정 요약
+                  </h4>
+                  <div className="emotion-analysis-box">
+                    {activityEmotionSummaryText}
+                  </div>
+                </section>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+
+        {/* 활동 유형 상세보기 모달 */}
+        {activityModalOpen && (
+          <div
+            className="modal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            onClick={() => setActivityModalOpen(false)}
+          >
+            <div
+              className="modal-card activity-detail-modal"
+              onClick={e => e.stopPropagation()}
+            >
+              <button
+                className="modal-close"
+                aria-label="닫기"
+                type="button"
+                onClick={() => setActivityModalOpen(false)}
+              >
+                ✕
+              </button>
+
+              <div className="activity-detail-header">
+                <div>
+                  <div className="activity-detail-title">
+                    🌿 활동 유형 분포 상세보기
+                  </div>
+                  <p className="muted">
+                    선택한 기간 동안 학생이 참여한 활동 유형과 시간을
+                    자세히 확인할 수 있습니다.
+                  </p>
+                </div>
+              </div>
+
+              <div className="activity-detail-scroll">
+                {/* 1) 활동 기록 리스트 */}
+                <section className="activity-detail-section">
+                  <h4 className="activity-detail-section-title">
+                    활동 기록 목록
+                  </h4>
+                  {activityDetailRows.length === 0 ? (
+                    <div className="muted">
+                      활동 데이터가 아직 없습니다.
+                    </div>
+                  ) : (
+                    <div className="activity-detail-table">
+                      <div className="activity-detail-table-header">
+                        <div className="col-date">날짜</div>
+                        <div className="col-activity">활동</div>
+                        <div className="col-category">유형</div>
+                        <div className="col-duration">소요 시간</div>
+                        <div className="col-emotions">감정</div>
+                      </div>
+                      {activityDetailRows.map((row, idx) => (
+                        <div
+                          key={`${row.date}-${row.activity}-${idx}`}
+                          className="activity-detail-table-row"
+                        >
+                          <div className="col-date">{row.date}</div>
+                          <div className="col-activity">
+                            {row.activity || '-'}
+                          </div>
+                          <div className="col-category">
+                            {row.category || '-'}
+                          </div>
+                          <div className="col-duration">
+                            {row.durationLabel || row.duration || '-'}
+                          </div>
+                          <div className="col-emotions">
+                            {row.emotions && row.emotions.length
+                              ? row.emotions.join(', ')
+                              : '-'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                {/* 2) 요약 카드 영역 */}
+                <section className="activity-detail-section">
+                  <h4 className="activity-detail-section-title">
+                    활동 분석 요약
+                  </h4>
+                  <div className="activity-analysis-box">
+                    {activityDetailSummaryText}
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Gemini 대시보드 채팅 패널 */}
       {isChatOpen && (

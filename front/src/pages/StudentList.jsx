@@ -14,6 +14,42 @@ function normalizeStudentsResponse(res) {
 
 // 상태 드롭다운에서 사용할 옵션들
 const STATUS_OPTIONS = ['재학중', '졸업', '중도이탈', '휴학']
+// 학교 단계 옵션
+const SCHOOL_LEVEL_OPTIONS = ['', '초등', '중등', '고등', '기타']
+
+// notes 컬럼을 [별칭] / [학교단계] / 메모로 분해
+function decodeStudentNotes(notes) {
+  const result = { alias: '', schoolLevel: '', memo: '' }
+  if (!notes) return result
+
+  const lines = String(notes).split('\n')
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('[별칭]')) {
+      result.alias = trimmed.replace('[별칭]', '').trim()
+    } else if (trimmed.startsWith('[학교단계]')) {
+      result.schoolLevel = trimmed.replace('[학교단계]', '').trim()
+    } else {
+      result.memo += (result.memo ? '\n' : '') + line
+    }
+  }
+  return result
+}
+
+// [별칭] / [학교단계] / 메모를 다시 notes 문자열로 합치기
+function encodeStudentNotes(alias, schoolLevel, memo) {
+  const lines = []
+  if (alias && alias.trim()) {
+    lines.push(`[별칭] ${alias.trim()}`)
+  }
+  if (schoolLevel && schoolLevel.trim()) {
+    lines.push(`[학교단계] ${schoolLevel.trim()}`)
+  }
+  if (memo && memo.trim()) {
+    lines.push(memo.trim())
+  }
+  return lines.join('\n') || null
+}
 
 export default function StudentList() {
   const [students, setStudents] = useState([])
@@ -25,7 +61,9 @@ export default function StudentList() {
   const [newStatus, setNewStatus] = useState('재학중')
   const [newAdmissionDate, setNewAdmissionDate] = useState('')
   const [newBirthDate, setNewBirthDate] = useState('')
-  const [newLogContent, setNewLogContent] = useState('')
+  const [newAlias, setNewAlias] = useState('')
+  const [newSchoolLevel, setNewSchoolLevel] = useState('')
+  const [newMemo, setNewMemo] = useState('')
   const [creating, setCreating] = useState(false)
 
   // ▶ 수정용 모달 상태
@@ -35,7 +73,9 @@ export default function StudentList() {
     status: '',
     admission_date: '',
     birth_date: '',
-    log_content: '',
+    alias: '',
+    schoolLevel: '',
+    memo: '',
   })
   const [savingEdit, setSavingEdit] = useState(false)
 
@@ -54,7 +94,16 @@ export default function StudentList() {
 
       const res = await apiFetch('/api/students?limit=200&offset=0')
       const list = normalizeStudentsResponse(res)
-      setStudents(list)
+      const enhanced = list.map(s => {
+        const decoded = decodeStudentNotes(s.notes)
+        return {
+          ...s,
+          alias: decoded.alias,
+          schoolLevel: decoded.schoolLevel,
+          memo: decoded.memo,
+        }
+      })
+      setStudents(enhanced)
     } catch (e) {
       console.error(e)
       setError('학생 목록을 불러오는 중 오류가 발생했습니다.')
@@ -75,12 +124,14 @@ export default function StudentList() {
       setCreating(true)
       setError('')
 
+      const notes = encodeStudentNotes(newAlias, newSchoolLevel, newMemo)
+
       const payload = {
         name: newName.trim(),
         status: newStatus || null,
         admission_date: newAdmissionDate || null,
         birth_date: newBirthDate || null,
-        log_content: newLogContent || null,
+        notes,
       }
 
       const created = await apiFetch('/api/students', {
@@ -89,14 +140,24 @@ export default function StudentList() {
         body: JSON.stringify(payload),
       })
 
-      setStudents(prev => [...prev, created])
+      const decoded = decodeStudentNotes(created.notes)
+      const enhancedCreated = {
+        ...created,
+        alias: decoded.alias,
+        schoolLevel: decoded.schoolLevel,
+        memo: decoded.memo,
+      }
+
+      setStudents(prev => [...prev, enhancedCreated])
 
       // 입력창 초기화
       setNewName('')
       setNewStatus('재학중')
       setNewAdmissionDate('')
       setNewBirthDate('')
-      setNewLogContent('')
+      setNewAlias('')
+      setNewSchoolLevel('')
+      setNewMemo('')
     } catch (e) {
       console.error(e)
       setError(e.message || '학생 추가 중 오류가 발생했습니다.')
@@ -110,6 +171,7 @@ export default function StudentList() {
     setEditingStudent(student || null)
 
     if (student) {
+      const decoded = decodeStudentNotes(student.notes)
       setEditForm({
         name: student.name || '',
         status: student.status || '',
@@ -119,7 +181,9 @@ export default function StudentList() {
         birth_date: student.birth_date
           ? String(student.birth_date).slice(0, 10)
           : '',
-        log_content: student.log_content || '',
+        alias: student.alias || decoded.alias || '',
+        schoolLevel: student.schoolLevel || decoded.schoolLevel || '',
+        memo: student.memo || decoded.memo || '',
       })
     } else {
       setEditForm({
@@ -127,7 +191,9 @@ export default function StudentList() {
         status: '',
         admission_date: '',
         birth_date: '',
-        log_content: '',
+        alias: '',
+        schoolLevel: '',
+        memo: '',
       })
     }
   }
@@ -149,12 +215,18 @@ export default function StudentList() {
       setSavingEdit(true)
       setError('')
 
+      const notes = encodeStudentNotes(
+        editForm.alias,
+        editForm.schoolLevel,
+        editForm.memo,
+      )
+
       const payload = {
         name: editForm.name,
         status: editForm.status || null,
         admission_date: editForm.admission_date || null,
         birth_date: editForm.birth_date || null,
-        log_content: editForm.log_content || null,
+        notes,
       }
 
       const updated = await apiFetch(`/api/students/${editingStudent.id}`, {
@@ -163,8 +235,16 @@ export default function StudentList() {
         body: JSON.stringify(payload),
       })
 
+      const decoded = decodeStudentNotes(updated.notes)
+      const enhancedUpdated = {
+        ...updated,
+        alias: decoded.alias,
+        schoolLevel: decoded.schoolLevel,
+        memo: decoded.memo,
+      }
+
       setStudents(prev =>
-        prev.map(s => (s.id === editingStudent.id ? { ...s, ...updated } : s)),
+        prev.map(s => (s.id === editingStudent.id ? enhancedUpdated : s)),
       )
 
       closeEditModal()
@@ -199,10 +279,10 @@ export default function StudentList() {
   }
 
   function getDisplayName(student) {
-    const realName = student.realName || student.name || ''
-    const nickname = student.nickname || student.log_content || ''
-    if (nickname && realName) return `${nickname}(${realName})`
-    return nickname || realName || '이름 없음'
+    const name = student.name || ''
+    const alias = student.alias || ''
+    if (alias && name) return `${alias}(${name})`
+    return name || alias || '이름 없음'
   }
 
   // -------------------- JSX --------------------
@@ -224,7 +304,7 @@ export default function StudentList() {
               학생 관리
             </h1>
             <p className="muted" style={{ fontSize: 13 }}>
-              학생을 추가/수정/삭제 할 수 있습니다.
+              학생을 추가/수정/삭제 할 수 있습니다. (별칭과 학교 단계를 함께 관리해 보세요)
             </p>
           </div>
         </div>
@@ -263,165 +343,242 @@ export default function StudentList() {
           }}
         >
           <form onSubmit={handleCreate}>
-            {/* 1행: 이름 + 상태 + 입학일 + 생년월일 (같은 라인) */}
-           <div
-             style={{
-               display: 'flex',
-               flexWrap: 'wrap',
-               gap: 16,
-               alignItems: 'center',
-               marginBottom: 8,
-             }}
-           >
-             {/* 학생 이름 */}
-             <div
-               style={{
-                 display: 'flex',
-                 alignItems: 'center',
-                 gap: 6,
-               }}
-             >
-               <span
-                 style={{
-                   fontSize: 13,
-                   color: '#6b7280',
-                   minWidth: 64,
-                   flexShrink: 0,
-                 }}
-               >
-                 학생 이름
-               </span>
-               <input
-                 className="app-input"
-                 type="text"
-                 placeholder="예: 홍길동"
-                 value={newName}
-                 onChange={e => setNewName(e.target.value)}
-                 style={{
-                   width: 140,
-                 }}
-               />
-             </div>
+            {/* 1행: 이름 + 별칭 + 학교단계 + 상태 */}
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 16,
+                alignItems: 'center',
+                marginBottom: 8,
+              }}
+            >
+              {/* 학생 이름 */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 13,
+                    color: '#6b7280',
+                    minWidth: 64,
+                    flexShrink: 0,
+                  }}
+                >
+                  학생 이름
+                </span>
+                <input
+                  className="app-input"
+                  type="text"
+                  placeholder="예: 홍길동"
+                  value={newName}
+                  onChange={e => setNewName(e.target.value)}
+                  style={{
+                    width: 140,
+                  }}
+                />
+              </div>
 
-             {/* 상태 */}
-             <div
-               style={{
-                 display: 'flex',
-                 alignItems: 'center',
-                 gap: 6,
-               }}
-             >
-               <span
-                 style={{
-                   fontSize: 13,
-                   color: '#6b7280',
-                   minWidth: 40,
-                   flexShrink: 0,
-                 }}
-               >
-                 상태
-               </span>
-               <select
-                 className="app-input"
-                 value={newStatus}
-                 onChange={e => setNewStatus(e.target.value)}
-                 style={{
-                   width: 140,
-                   paddingRight: 28, // 드롭다운 화살표 여백
-                 }}
-               >
-                 {STATUS_OPTIONS.map(opt => (
-                   <option key={opt} value={opt}>
-                     {opt}
-                   </option>
-                 ))}
-               </select>
-             </div>
+              {/* 별칭(alias) */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 13,
+                    color: '#6b7280',
+                    minWidth: 52,
+                    flexShrink: 0,
+                  }}
+                >
+                  별칭
+                </span>
+                <input
+                  className="app-input"
+                  type="text"
+                  placeholder="예: 꽃사슴"
+                  value={newAlias}
+                  onChange={e => setNewAlias(e.target.value)}
+                  style={{
+                    width: 140,
+                  }}
+                />
+              </div>
 
-             {/* 입학일 */}
-             <div
-               style={{
-                 display: 'flex',
-                 alignItems: 'center',
-                 gap: 6,
-               }}
-             >
-               <span
-                 style={{
-                   fontSize: 13,
-                   color: '#6b7280',
-                   minWidth: 48,
-                   flexShrink: 0,
-                 }}
-               >
-                 입학일
-               </span>
-               <input
-                 className="app-input"
-                 type="date"
-                 value={newAdmissionDate}
-                 onChange={e => setNewAdmissionDate(e.target.value)}
-                 style={{
-                   width: 140,
-                   borderRadius: 999,
-                 }}
-               />
-             </div>
+              {/* 학교 단계 */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 13,
+                    color: '#6b7280',
+                    minWidth: 64,
+                    flexShrink: 0,
+                  }}
+                >
+                  학교 단계
+                </span>
+                <select
+                  className="app-input"
+                  value={newSchoolLevel}
+                  onChange={e => setNewSchoolLevel(e.target.value)}
+                  style={{
+                    width: 120,
+                    paddingRight: 28,
+                  }}
+                >
+                  <option value="">선택 없음</option>
+                  {SCHOOL_LEVEL_OPTIONS.filter(x => x).map(opt => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-             {/* 생년월일 */}
-             <div
-               style={{
-                 display: 'flex',
-                 alignItems: 'center',
-                 gap: 6,
-               }}
-             >
-               <span
-                 style={{
-                   fontSize: 13,
-                   color: '#6b7280',
-                   minWidth: 60,
-                   flexShrink: 0,
-                 }}
-               >
-                 생년월일
-               </span>
-               <input
-                 className="app-input"
-                 type="date"
-                 value={newBirthDate}
-                 onChange={e => setNewBirthDate(e.target.value)}
-                 style={{
-                   width: 140,
-                   borderRadius: 999,
-                 }}
-               />
-             </div>
-           </div>
+              {/* 상태 */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 13,
+                    color: '#6b7280',
+                    minWidth: 40,
+                    flexShrink: 0,
+                  }}
+                >
+                  상태
+                </span>
+                <select
+                  className="app-input"
+                  value={newStatus}
+                  onChange={e => setNewStatus(e.target.value)}
+                  style={{
+                    width: 120,
+                    paddingRight: 28,
+                  }}
+                >
+                  {STATUS_OPTIONS.map(opt => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
 
-           {/* 2행: 메모 (넓은 textarea) */}
-           <div style={{ marginBottom: 8 }}>
-             <div
-               style={{
-                 fontSize: 13,
-                 color: '#6b7280',
-                 marginBottom: 4,
-               }}
-             >
-               메모(별명/특이사항)
-             </div>
-             <textarea
-               className="app-textarea"
-               placeholder="예: 좋아하는 활동, 특이사항 등을 적어주세요."
-               value={newLogContent}
-               onChange={e => setNewLogContent(e.target.value)}
-               rows={4}
-               style={{
-                 width: '98%',
-                 minWidth: 200,
-                 fontSize: 13,
-               }}
-             />
+            {/* 2행: 입학일 + 생년월일 */}
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 16,
+                alignItems: 'center',
+                marginBottom: 8,
+              }}
+            >
+              {/* 입학일 */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 13,
+                    color: '#6b7280',
+                    minWidth: 48,
+                    flexShrink: 0,
+                  }}
+                >
+                  입학일
+                </span>
+                <input
+                  className="app-input"
+                  type="date"
+                  value={newAdmissionDate}
+                  onChange={e => setNewAdmissionDate(e.target.value)}
+                  style={{
+                    width: 140,
+                    borderRadius: 999,
+                  }}
+                />
+              </div>
+
+              {/* 생년월일 */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 13,
+                    color: '#6b7280',
+                    minWidth: 60,
+                    flexShrink: 0,
+                  }}
+                >
+                  생년월일
+                </span>
+                <input
+                  className="app-input"
+                  type="date"
+                  value={newBirthDate}
+                  onChange={e => setNewBirthDate(e.target.value)}
+                  style={{
+                    width: 140,
+                    borderRadius: 999,
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* 3행: 메모 (넓은 textarea) */}
+            <div style={{ marginBottom: 8 }}>
+              <div
+                style={{
+                  fontSize: 13,
+                  color: '#6b7280',
+                  marginBottom: 4,
+                }}
+              >
+                메모(별명/특이사항)
+              </div>
+              <textarea
+                className="app-textarea"
+                placeholder="예: 좋아하는 활동, 특이사항 등을 적어주세요."
+                value={newMemo}
+                onChange={e => setNewMemo(e.target.value)}
+                rows={4}
+                style={{
+                  width: '98%',
+                  minWidth: 200,
+                  fontSize: 13,
+                }}
+              />
             </div>
 
             {/* 하단: 학생 추가 버튼 (컨테이너 하단 우측) */}
@@ -487,7 +644,18 @@ export default function StudentList() {
                     color: '#6b7280',
                   }}
                 >
-                  이름
+                  이름(별칭)
+                </th>
+                <th
+                  style={{
+                    textAlign: 'left',
+                    padding: '10px 12px',
+                    fontWeight: 500,
+                    fontSize: 13,
+                    color: '#6b7280',
+                  }}
+                >
+                  학교 단계
                 </th>
                 <th
                   style={{
@@ -540,7 +708,7 @@ export default function StudentList() {
               {students.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={6}
                     style={{
                       padding: '14px 12px',
                       fontSize: 13,
@@ -571,6 +739,15 @@ export default function StudentList() {
                           color: '#4b5563',
                         }}
                       >
+                        {student.schoolLevel || '-'}
+                      </td>
+                      <td
+                        style={{
+                          padding: '10px 12px',
+                          fontSize: 13,
+                          color: '#4b5563',
+                        }}
+                      >
                         {statusLabel}
                       </td>
                       <td
@@ -592,9 +769,9 @@ export default function StudentList() {
                           textOverflow: 'ellipsis',
                           overflow: 'hidden',
                         }}
-                        title={student.log_content || ''}
+                        title={student.memo || student.notes || ''}
                       >
-                        {student.log_content || ''}
+                        {student.memo || student.notes || ''}
                       </td>
                       <td
                         style={{
@@ -666,7 +843,7 @@ export default function StudentList() {
             className="modal"
             style={{
               width: '100%',
-              maxWidth: 480,
+              maxWidth: 520,
               borderRadius: 18,
               background: '#ffffff',
               padding: 20,
@@ -725,6 +902,50 @@ export default function StudentList() {
                     fontSize: 14,
                   }}
                 />
+              </label>
+
+              <label style={{ fontSize: 13 }}>
+                별칭
+                <input
+                  type="text"
+                  name="alias"
+                  value={editForm.alias}
+                  onChange={handleEditChange}
+                  placeholder="동명이인 구분용 별칭"
+                  style={{
+                    width: '100%',
+                    marginTop: 4,
+                    padding: '8px 10px',
+                    borderRadius: 10,
+                    border: '1px solid #d1d5db',
+                    fontSize: 14,
+                  }}
+                />
+              </label>
+
+              <label style={{ fontSize: 13 }}>
+                학교 단계
+                <select
+                  name="schoolLevel"
+                  value={editForm.schoolLevel}
+                  onChange={handleEditChange}
+                  style={{
+                    width: '100%',
+                    marginTop: 4,
+                    padding: '8px 10px',
+                    borderRadius: 10,
+                    border: '1px solid #d1d5db',
+                    fontSize: 14,
+                    backgroundColor: '#ffffff',
+                  }}
+                >
+                  <option value="">선택 없음</option>
+                  {SCHOOL_LEVEL_OPTIONS.filter(x => x).map(opt => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
               </label>
 
               <label style={{ fontSize: 13 }}>
@@ -803,10 +1024,10 @@ export default function StudentList() {
               <label style={{ fontSize: 13 }}>
                 메모(별명/특이사항)
                 <textarea
-                  name="log_content"
-                  value={editForm.log_content}
+                  name="memo"
+                  value={editForm.memo}
                   onChange={handleEditChange}
-                  rows={4} // 메모 영역 조금 더 넓게
+                  rows={4}
                   style={{
                     width: '100%',
                     marginTop: 4,

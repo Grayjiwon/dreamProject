@@ -94,13 +94,18 @@ function normalizeReportRuns(rawRuns) {
       REPORT_CATEGORY_CONFIG[categoryCode]?.label ||
       '리포트'
 
-    const purposeCode = params.purpose || template.purpose || run.purpose || 'other'
+    const purposeCode =
+      params.purpose || template.purpose || run.purpose || 'other'
+
     const purposeLabel =
-      purposeCode === 'parent'
+      params.purpose_label ||
+      (purposeCode === 'parent'
         ? '학부모 상담용'
         : purposeCode === 'school'
         ? '학교 제출용'
-        : null
+        : purposeCode === 'all'
+        ? '전체 용도'
+        : null)
 
     const createdAt = run.created_at
     const expiresAt =
@@ -161,6 +166,10 @@ export default function Report() {
 
   const [nowTs, setNowTs] = useState(Date.now())
 
+  // 최근 활동 기반 퀵 버튼용 로그
+  const [recentActivities, setRecentActivities] = useState([])
+  const [recentActivitiesLoading, setRecentActivitiesLoading] = useState(false)
+
   const isInvalidRange =
     filterMode === 'range' && startDate && endDate && startDate > endDate
 
@@ -169,11 +178,11 @@ export default function Report() {
     setError(null)
     try {
       const data = await apiFetch('/report-runs')
-      // server.js가 { runs: ... }가 아니라 배열을 직접 줄 수도 있고, 아닐 수도 있음
-      // 현재 서버 코드는 res.json(data) 이고 data는 배열일 가능성이 높음.
-      // 하지만 insert return은 객체이므로 list 조회 로직을 확인해야 함.
-      // list api는 배열을 반환한다고 가정.
-      const runs = Array.isArray(data?.runs) ? data.runs : Array.isArray(data) ? data : []
+      const runs = Array.isArray(data?.runs)
+        ? data.runs
+        : Array.isArray(data)
+        ? data
+        : []
 
       let normalized = normalizeReportRuns(runs)
       if (currentUser?.id) {
@@ -200,7 +209,10 @@ export default function Report() {
     setStudentsLoading(true)
     setStudentsError(null)
     try {
-      const data = await apiFetch('/api/students?limit=1000')
+      // 리포트 생성에서는 "재학중" 학생만 조회
+      const data = await apiFetch(
+        `/api/students?limit=1000&status=${encodeURIComponent('재학중')}`,
+      )
       const items = Array.isArray(data?.items) ? data.items : data || []
       setStudents(items)
     } catch (err) {
@@ -211,10 +223,49 @@ export default function Report() {
     }
   }
 
+  // 선택된 학생의 최근 활동(기본 50개) 로딩 → 퀵 버튼에서 사용
+  async function fetchRecentActivitiesForStudent(selectedId) {
+    if (!selectedId || selectedId === 'all') {
+      setRecentActivities([])
+      return
+    }
+    setRecentActivitiesLoading(true)
+    try {
+      const data = await apiFetch(
+        `/api/log_entries?student_id=${encodeURIComponent(selectedId)}&limit=50`,
+      )
+      const items = Array.isArray(data?.items) ? data.items : data || []
+      setRecentActivities(items)
+    } catch (err) {
+      console.error(err)
+      setRecentActivities([])
+    } finally {
+      setRecentActivitiesLoading(false)
+    }
+  }
+
   useEffect(() => {
     fetchReports()
     fetchStudents()
   }, [currentUser])
+
+  // 기본 날짜: 최근 1개월
+  useEffect(() => {
+    const today = new Date()
+    const end = today.toISOString().slice(0, 10)
+    const past = new Date()
+    past.setDate(today.getDate() - 30)
+    const start = past.toISOString().slice(0, 10)
+
+    setFilterMode('range')
+    setStartDate(start)
+    setEndDate(end)
+  }, [])
+
+  // 학생이 바뀌면 최근 활동 가져오기 (퀵 버튼용)
+  useEffect(() => {
+    fetchRecentActivitiesForStudent(studentId)
+  }, [studentId])
 
   useEffect(() => {
     const timer = setInterval(() => setNowTs(Date.now()), 60 * 1000)
@@ -225,12 +276,19 @@ export default function Report() {
 
   function handleResetFilters() {
     setFilterMode('range')
-    setStartDate('')
-    setEndDate('')
     setSingleDate('')
     setCategory('all')
     setStudentId('all')
     setPurpose('all')
+
+    // 날짜는 다시 최근 1개월로
+    const today = new Date()
+    const end = today.toISOString().slice(0, 10)
+    const past = new Date()
+    past.setDate(today.getDate() - 30)
+    const start = past.toISOString().slice(0, 10)
+    setStartDate(start)
+    setEndDate(end)
   }
 
   async function handleDelete(report) {
@@ -242,6 +300,54 @@ export default function Report() {
       console.error(err)
       alert('리포트 삭제 중 오류가 발생했습니다.')
     }
+  }
+
+  // 🔹 최근 활동 N회 기반으로 날짜 자동 설정
+  function applyRecentActivityRange(count) {
+    if (!studentId || studentId === 'all') {
+      alert('먼저 학생을 선택해 주세요.')
+      return
+    }
+
+    if (!recentActivities || recentActivities.length === 0) {
+      if (recentActivitiesLoading) {
+        alert('학생의 활동 기록을 불러오는 중입니다. 잠시 후 다시 시도해 주세요.')
+      } else {
+        alert('선택한 학생의 활동 기록이 아직 없습니다.')
+      }
+      return
+    }
+
+    const withDate = recentActivities
+      .map(item => {
+        const dateStr =
+          item.log_date ||
+          (item.created_at ? String(item.created_at).slice(0, 10) : null)
+        if (!dateStr) return null
+        return { ...item, _date: dateStr }
+      })
+      .filter(Boolean)
+
+    if (withDate.length === 0) {
+      alert('활동 기록에 날짜 정보가 없어 기간을 계산할 수 없습니다.')
+      return
+    }
+
+    const sorted = [...withDate].sort((a, b) => a._date.localeCompare(b._date))
+    const sliceStart = Math.max(sorted.length - count, 0)
+    const selected = sorted.slice(sliceStart)
+
+    if (selected.length === 0) {
+      alert('선택한 범위에 해당하는 활동 기록이 없습니다.')
+      return
+    }
+
+    const fromDate = selected[0]._date
+    const toDate = selected[selected.length - 1]._date
+
+    setFilterMode('range')
+    setStartDate(fromDate)
+    setEndDate(toDate)
   }
 
   // 🔹 md 리포트 다운로드 (핵심 수정됨)
@@ -312,8 +418,9 @@ export default function Report() {
       alert('날짜를 선택해 주세요.')
       return
     }
+    // 🔸 학생이 "전체"인 상태에서는 생성 불가
     if (!studentId || studentId === 'all') {
-      alert('학생을 선택해 주세요.')
+      alert('학생을 선택해 주세요. (전체 학생에 대한 리포트는 생성할 수 없습니다.)')
       return
     }
 
@@ -326,21 +433,30 @@ export default function Report() {
       const [studentProfile, summaryStats, activityLogs] = await Promise.all([
         apiFetch(`/api/students/${encodeURIComponent(studentId)}`).catch(() => null),
         apiFetch(`/api/dashboard?studentId=${studentId}&from=${from}&to=${to}`).catch(() => null),
-        apiFetch(`/api/log_entries?student_id=${studentId}&from=${from}&to=${to}&limit=50`).catch(() => null)
+        apiFetch(
+          `/api/log_entries?student_id=${studentId}&from=${from}&to=${to}&limit=50`,
+        ).catch(() => null),
       ])
 
-      const activitySamples = activityLogs?.items?.map(item => ({
-        id: item.id,
-        date: item.log_date,
-        emotion_tag: item.emotion_tag,
-        activity_tags: item.activity_tags,
-        log_content: item.log_content,
-        related_metrics: item.related_metrics,
-      })) || []
+      const activitySamples =
+        activityLogs?.items?.map(item => ({
+          id: item.id,
+          date: item.log_date,
+          emotion_tag: item.emotion_tag,
+          activity_tags: item.activity_tags,
+          log_content: item.log_content,
+          related_metrics: item.related_metrics,
+        })) || []
+
+      const effectivePurpose =
+        !purpose || purpose === 'all' ? 'all' : purpose
 
       const tone =
-        purpose === 'parent' ? '부드럽고 공감적인 학부모 상담용 톤' :
-        purpose === 'school' ? '학교 제출용 공식적인 톤' : '교사가 참고하기 좋은 중립적인 톤'
+        effectivePurpose === 'parent'
+          ? '부드럽고 공감적인 학부모 상담용 톤'
+          : effectivePurpose === 'school'
+          ? '학교 제출용 공식적인 톤'
+          : '교사가 참고하기 좋은 중립적인 톤'
 
       const aiPayload = {
         student_profile: studentProfile,
@@ -348,7 +464,7 @@ export default function Report() {
         summary_stats: summaryStats,
         activity_samples: activitySamples,
         report_options: {
-          purpose,
+          purpose: effectivePurpose,
           tone,
           category_code: categoryConfig.code,
           category_label: categoryConfig.label,
@@ -363,10 +479,19 @@ export default function Report() {
       if (!markdown) throw new Error('AI가 리포트 내용을 반환하지 않았습니다.')
 
       // 2. DB 저장
-      const studentName = studentProfile?.name || students.find(s => s.id === studentId)?.name || '학생'
-      const dateLabel = from && to && from !== to ? `${from} ~ ${to}` : from || ''
+      const studentName =
+        studentProfile?.name ||
+        students.find(s => s.id === studentId)?.name ||
+        '학생'
+      const dateLabel =
+        from && to && from !== to ? `${from} ~ ${to}` : from || ''
       const categoryLabel = categoryConfig.label || '종합 리포트'
       const title = `${studentName} ${dateLabel} ${categoryLabel}`.trim()
+
+      let purposeLabel = null
+      if (effectivePurpose === 'parent') purposeLabel = '학부모 상담용'
+      else if (effectivePurpose === 'school') purposeLabel = '학교 제출용'
+      else if (effectivePurpose === 'all') purposeLabel = '전체 용도'
 
       const reportParams = {
         title,
@@ -375,12 +500,14 @@ export default function Report() {
         filter_mode: filterMode,
         category_code: categoryConfig.code,
         category_label: categoryConfig.label,
-        purpose,
+        purpose: effectivePurpose,
+        purpose_label: purposeLabel,
         student_id: studentId,
         student_name: studentName,
         markdown, // 🚨 핵심: AI가 생성한 마크다운을 여기에 포함
         created_by_user_id: currentUser?.id,
-        created_by_name: currentUser?.display_name || currentUser?.email,
+        created_by_name:
+          currentUser?.display_name || currentUser?.email,
       }
 
       await apiFetch('/report-runs', {
@@ -428,6 +555,16 @@ export default function Report() {
                     <div className="muted" style={{ fontSize: 13 }}>
                       날짜, 카테고리, 학생을 선택하여 AI 리포트를 생성합니다.
                     </div>
+                    {studentsLoading && (
+                      <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                        재학중 학생 목록을 불러오는 중입니다...
+                      </div>
+                    )}
+                    {studentsError && (
+                      <div className="error" style={{ fontSize: 11, marginTop: 4 }}>
+                        {studentsError}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -438,14 +575,18 @@ export default function Report() {
                   <div className="filter-radio-row">
                     <button
                       type="button"
-                      className={`filter-toggle ${filterMode === 'range' ? 'active' : ''}`}
+                      className={`filter-toggle ${
+                        filterMode === 'range' ? 'active' : ''
+                      }`}
                       onClick={() => setFilterMode('range')}
                     >
                       날짜 범위
                     </button>
                     <button
                       type="button"
-                      className={`filter-toggle ${filterMode === 'single' ? 'active' : ''}`}
+                      className={`filter-toggle ${
+                        filterMode === 'single' ? 'active' : ''
+                      }`}
                       onClick={() => setFilterMode('single')}
                     >
                       특정 날짜
@@ -458,23 +599,41 @@ export default function Report() {
                     <>
                       <div className="filter-field">
                         <label>시작 날짜</label>
-                        <input type="date" value={startDate} max={endDate} onChange={e => setStartDate(e.target.value)} />
+                        <input
+                          type="date"
+                          value={startDate}
+                          max={endDate || undefined}
+                          onChange={e => setStartDate(e.target.value)}
+                        />
                       </div>
                       <div className="filter-field">
                         <label>종료 날짜</label>
-                        <input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)} />
+                        <input
+                          type="date"
+                          value={endDate}
+                          min={startDate || undefined}
+                          onChange={e => setEndDate(e.target.value)}
+                        />
                       </div>
                     </>
                   ) : (
                     <div className="filter-field">
                       <label>날짜</label>
-                      <input type="date" value={singleDate} onChange={e => setSingleDate(e.target.value)} />
+                      <input
+                        type="date"
+                        value={singleDate}
+                        onChange={e => setSingleDate(e.target.value)}
+                      />
                     </div>
                   )}
 
                   <div className="filter-field">
                     <label>카테고리</label>
-                    <select value={category} onChange={e => setCategory(e.target.value)} className="report-select">
+                    <select
+                      value={category}
+                      onChange={e => setCategory(e.target.value)}
+                      className="report-select"
+                    >
                       <option value="all">전체</option>
                       <option value="full">전체 리포트</option>
                       <option value="emotion">감정 변화</option>
@@ -485,17 +644,27 @@ export default function Report() {
 
                   <div className="filter-field">
                     <label>학생</label>
-                    <select value={studentId} onChange={e => setStudentId(e.target.value)} className="report-select">
+                    <select
+                      value={studentId}
+                      onChange={e => setStudentId(e.target.value)}
+                      className="report-select"
+                    >
                       <option value="all">전체</option>
                       {students.map(s => (
-                        <option key={s.id} value={s.id}>{s.name}</option>
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
                       ))}
                     </select>
                   </div>
 
                   <div className="filter-field">
                     <label>용도</label>
-                    <select value={purpose} onChange={e => setPurpose(e.target.value)} className="report-select">
+                    <select
+                      value={purpose}
+                      onChange={e => setPurpose(e.target.value)}
+                      className="report-select"
+                    >
                       <option value="all">전체</option>
                       <option value="parent">학부모 상담용</option>
                       <option value="school">학교 제출용</option>
@@ -503,10 +672,59 @@ export default function Report() {
                   </div>
                 </div>
 
+                {/* 🔹 최근 활동 기반 퀵 버튼 */}
+                {filterMode === 'range' && (
+                  <div className="report-quick-row" style={{ marginTop: 8 }}>
+                    <div className="filter-label-row" style={{ marginBottom: 4 }}>
+                      <span className="filter-label">
+                        빠른 선택 (최근 활동 기준)
+                      </span>
+                      {recentActivitiesLoading && (
+                        <span
+                          className="muted"
+                          style={{ fontSize: 11, marginLeft: 8 }}
+                        >
+                          활동 기록을 불러오는 중...
+                        </span>
+                      )}
+                    </div>
+                    <div className="filter-radio-row">
+                      <button
+                        type="button"
+                        className="filter-toggle"
+                        onClick={() => applyRecentActivityRange(5)}
+                      >
+                        최근 활동 5회
+                      </button>
+                      <button
+                        type="button"
+                        className="filter-toggle"
+                        onClick={() => applyRecentActivityRange(10)}
+                      >
+                        최근 활동 10회
+                      </button>
+                    </div>
+                    <div
+                      className="muted"
+                      style={{ fontSize: 11, marginTop: 4 }}
+                    >
+                      선택한 학생의 최근 활동 횟수를 기준으로 시작/종료 날짜를 자동 설정합니다.
+                    </div>
+                  </div>
+                )}
+
                 <div className="report-filter-footer">
-                  <span className="muted">현재 리포트 수: <strong>{totalCount}</strong>개</span>
+                  <span className="muted">
+                    현재 리포트 수: <strong>{totalCount}</strong>개
+                  </span>
                   <div className="report-filter-actions">
-                    <button type="button" className="btn secondary report-reset-btn" onClick={handleResetFilters}>필터 초기화</button>
+                    <button
+                      type="button"
+                      className="btn secondary report-reset-btn"
+                      onClick={handleResetFilters}
+                    >
+                      필터 초기화
+                    </button>
                     <button
                       type="button"
                       className="btn secondary report-ai-btn"
@@ -517,8 +735,19 @@ export default function Report() {
                     </button>
                   </div>
                 </div>
-                {isInvalidRange && <div className="error" style={{ fontSize: 12, marginTop: 4 }}>날짜 범위를 확인해주세요.</div>}
-                {generateError && <div className="error" style={{ marginTop: 4 }}>{generateError}</div>}
+                {isInvalidRange && (
+                  <div
+                    className="error"
+                    style={{ fontSize: 12, marginTop: 4 }}
+                  >
+                    날짜 범위를 확인해주세요.
+                  </div>
+                )}
+                {generateError && (
+                  <div className="error" style={{ marginTop: 4 }}>
+                    {generateError}
+                  </div>
+                )}
               </form>
             </div>
           </section>
@@ -532,41 +761,83 @@ export default function Report() {
               <p></p>
 
               {loading ? (
-                <div className="card-body"><div className="loading-text">Loading...</div></div>
+                <div className="card-body">
+                  <div className="loading-text">Loading...</div>
+                </div>
               ) : error ? (
-                <div className="card-body"><div className="error">{error}</div></div>
+                <div className="card-body">
+                  <div className="error">{error}</div>
+                </div>
               ) : totalCount === 0 ? (
-                <div className="card-body"><div className="empty-state">생성된 리포트가 없습니다.</div></div>
+                <div className="card-body">
+                  <div className="empty-state">생성된 리포트가 없습니다.</div>
+                </div>
               ) : (
                 <div className="report-list">
                   {reports.map(report => {
                     const remaining = getRemainingInfo(report, nowTs)
-                    const rangeText = report.analysisFrom || report.analysisTo ? `${report.analysisFrom || '?'} ~ ${report.analysisTo || '?'}` : null
+                    const rangeText =
+                      report.analysisFrom || report.analysisTo
+                        ? `${report.analysisFrom || '?'} ~ ${
+                            report.analysisTo || '?'
+                          }`
+                        : null
                     return (
-                      <article key={report.id} className={`report-card ${remaining.expired ? 'report-card-expired' : ''}`}>
+                      <article
+                        key={report.id}
+                        className={`report-card ${
+                          remaining.expired ? 'report-card-expired' : ''
+                        }`}
+                      >
                         <div className="report-card-main">
                           <div className="report-card-header">
                             <div className="report-card-title">
-                              <span className="report-card-student">🔗 {report.studentName}</span>
-                              {report.purposeLabel && <span className="report-chip report-chip-purpose">{report.purposeLabel}</span>}
-                              <span className={`report-chip report-chip-state ${remaining.expired ? 'expired' : ''}`}>
+                              <span className="report-card-student">
+                                🔗 {report.studentName}
+                              </span>
+                              {report.purposeLabel && (
+                                <span className="report-chip report-chip-purpose">
+                                  {report.purposeLabel}
+                                </span>
+                              )}
+                              <span
+                                className={`report-chip report-chip-state ${
+                                  remaining.expired ? 'expired' : ''
+                                }`}
+                              >
                                 {remaining.expired ? '만료됨' : '진행 중'}
                               </span>
                             </div>
                           </div>
-                          {rangeText && <div className="report-card-meta-row">분석 기간: {rangeText}</div>}
+                          {rangeText && (
+                            <div className="report-card-meta-row">
+                              분석 기간: {rangeText}
+                            </div>
+                          )}
                           <div className="report-card-remaining-row">
                             <span className="report-remaining-icon">⏱</span>
-                            <span className={`report-remaining-text ${remaining.expired ? 'danger' : ''}`}>
+                            <span
+                              className={`report-remaining-text ${
+                                remaining.expired ? 'danger' : ''
+                              }`}
+                            >
                               남은 시간: {remaining.label}
                             </span>
                           </div>
                         </div>
                         <div className="report-card-actions">
-                          <button type="button" className="btn secondary-outline report-btn" onClick={() => handleDownloadMd(report)}>
+                          <button
+                            type="button"
+                            className="btn secondary-outline report-btn"
+                            onClick={() => handleDownloadMd(report)}
+                          >
                             다운로드
                           </button>
-                          <button type="button" className="btn danger-outline report-btn" onClick={() => handleDelete(report)}>
+                          <button
+                            type="button"
+                            className="btn danger-outline report-btn"
+                            onClick={() => handleDelete(report)}
+                          >
                             삭제
                           </button>
                         </div>

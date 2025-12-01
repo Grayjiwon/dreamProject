@@ -23,7 +23,7 @@ import { apiFetch, extractRecordsWithGemini } from '../lib/api.js'
  *    emotion_tag     : text (대표 감정)
  *    activity_tags   : text[] (활동 유형 태그)
  *    log_content     : text (텍스트 전체 or 요약)
- *    related_metrics : jsonb (점수, 소요시간, 능력 등 복합 구조)
+ *    related_metrics : jsonb[] (점수, 소요시간, 능력 등 복합 구조)
  *
  * - emotion_keywords
  *    id        : uuid
@@ -53,7 +53,9 @@ import { apiFetch, extractRecordsWithGemini } from '../lib/api.js'
  *         level: "...",
  *         ability: ["집중력", "소근육"],
  *         score: 85,
- *         score_explanation: "..."
+ *         score_explanation: "...",
+ *         emotionTags: [...],
+ *         emotionSummary: "..."
  *       }
  *     },
  *     ...
@@ -119,6 +121,7 @@ function normalizeAnalysis(raw) {
 
   const emotionTagsRaw =
     a.emotionTags ||
+    a.emotion_tags ||
     raw.emotion_tags ||
     a.emotion_keywords ||
     raw.emotion_keywords ||
@@ -128,14 +131,25 @@ function normalizeAnalysis(raw) {
     students: a.students || raw.students || [],
     date: a.date || raw.date || raw.log_date || null,
     activityName:
-      a.activityName || raw.activityName || raw.activity_name || raw.title || '',
+      a.activityName ||
+      a.activity_name ||
+      raw.activityName ||
+      raw.activity_name ||
+      raw.title ||
+      '',
     durationMinutes:
       a.durationMinutes ||
+      a.duration_minutes ||
       raw.durationMinutes ||
       raw.duration_minutes ||
       null,
-    activityType: a.activityType || raw.activityType || raw.activity_type || '',
-    note: a.note || raw.note || '',
+    activityType:
+      a.activityType ||
+      a.activity_type ||
+      raw.activityType ||
+      raw.activity_type ||
+      '',
+    note: a.note || raw.note || a.memo || raw.memo || '',
     level: a.level || raw.level || '',
     ability: a.ability || a.abilities || raw.ability || raw.abilities || [],
     score:
@@ -145,7 +159,11 @@ function normalizeAnalysis(raw) {
         ? raw.score
         : null,
     scoreExplanation:
-      a.scoreExplanation || raw.scoreExplanation || raw.score_explanation || '',
+      a.scoreExplanation ||
+      a.score_explanation ||
+      raw.scoreExplanation ||
+      raw.score_explanation ||
+      '',
     emotionSummary: a.emotionSummary || legacyEmotion || '',
     emotionCause: a.emotionCause || a.emotion_reason || raw.emotionCause || '',
     observedBehaviors:
@@ -161,6 +179,7 @@ function normalizeAnalysis(raw) {
       raw.raw_text_cleaned ||
       raw.raw_text ||
       '',
+    isAiGenerated: !!(a.isAiGenerated || a.aiGenerated || raw.isAiGenerated),
   }
 }
 
@@ -172,10 +191,17 @@ function hydrateUpload(raw) {
     raw.uuid ||
     String(raw.file_name || raw.filename || raw.name || Math.random())
 
-  const fileName = raw.file_name || raw.filename || raw.name || '이름 없는 파일'
+  const fileName = raw.file_name || raw.filename || raw.name
 
   const studentName =
-    raw.student_name || raw.student?.name || raw.meta?.student_name || '학생 미확인'
+    raw.student_name || raw.student?.name || raw.meta?.student_name
+
+  const uploaderName =
+    raw.uploader_name ||
+    raw.uploaderName ||
+    raw.uploaded_by_name ||
+    raw.meta?.uploader_name ||
+    ''
 
   const uploadedAt =
     raw.created_at || raw.uploaded_at || raw.uploadDate || raw.createdAt || null
@@ -208,6 +234,7 @@ function hydrateUpload(raw) {
     id,
     file_name: fileName,
     student_name: studentName,
+    uploader_name: uploaderName,
     uploaded_at: uploadedAt,
     status,
     steps,
@@ -301,14 +328,6 @@ function buildActivityTypeState(rawTypes = null, rawDetails = null) {
 }
 
 // 감정 태그 직렬화
-function serializeEmotionTags(tags) {
-  if (!Array.isArray(tags)) return []
-  return tags
-    .map(v => String(v || '').trim())
-    .filter(Boolean)
-}
-
-// 상세 모달 상태 기본값
 function createDetailState(overrides = {}) {
   return {
     open: false,
@@ -318,8 +337,15 @@ function createDetailState(overrides = {}) {
     saving: false,
     saved: false,
 
+    // 텍스트 편집
     editedText: '',
 
+    // 날짜 / 날짜별 텍스트
+    dates: [],
+    activeDate: null,
+    rawTextByDate: {},
+
+    // 학생 / 분석 정보
     students: [],
     activeStudentId: null,
     analysisByStudent: {},
@@ -356,6 +382,41 @@ function getActiveStudentState(detail) {
     analysis: current.analysis || {},
     activityTypes: current.activityTypes || buildActivityTypeState(),
   }
+}
+
+function getCurrentRawText(detail) {
+  const upload = detail.upload || {}
+
+  const baseRaw =
+    (detail.editedText && detail.editedText.trim()) ||
+    upload.raw_text ||
+    upload.analysis?.rawTextCleaned ||
+    ''
+
+  const dates = detail.dates || []
+  const activeDate = detail.activeDate
+  const rawByDate = detail.rawTextByDate || {}
+
+  // 날짜 탭이 없으면 전체 텍스트 사용
+  if (!dates.length || !activeDate) {
+    return baseRaw
+  }
+
+  // 날짜가 1개일 때: 그 날짜 텍스트가 있으면 우선 사용
+  if (dates.length === 1) {
+    return rawByDate[activeDate] || baseRaw
+  }
+
+  // 날짜가 여러 개일 때: 선택된 날짜 텍스트 우선
+  return rawByDate[activeDate] || baseRaw
+}
+
+function handleSelectDate(dateStr) {
+  setDetail(prev => ({
+    ...prev,
+    activeDate: dateStr,
+    saved: false,
+  }))
 }
 
 // -------------------- 페이지 컴포넌트 --------------------
@@ -492,6 +553,30 @@ export default function UploadPage() {
     loadStudentsMaster()
   }, [])
 
+  // 🔹 상세 편집 모달이 열리면 자동으로 AI 분석 실행
+  useEffect(() => {
+    if (!detail.open || detail.loading || !detail.upload) return
+    if (detail.autoAiRequested) return
+
+    const sourceText =
+      (detail.editedText && detail.editedText.trim()) ||
+      detail.upload.raw_text ||
+      detail.upload.analysis?.rawTextCleaned ||
+      ''
+
+    if (!sourceText) return
+
+    // 이 모달에서 한 번만 자동 실행
+    setDetail(prev => ({ ...prev, autoAiRequested: true }))
+    handleRunAiExtraction()
+  }, [
+    detail.open,
+    detail.loading,
+    detail.upload,
+    detail.editedText,
+    detail.autoAiRequested,
+  ])
+
   // ---------- 파일 업로드 ----------
 
   async function handleFiles(files) {
@@ -510,6 +595,19 @@ export default function UploadPage() {
         const form = new FormData()
         form.append('file', file)
 
+        // 추가: 로그인 사용자 정보를 함께 전송해 ingest_uploads.uploaded_by 에 기록
+        try {
+          const rawUser = localStorage.getItem('user')
+          if (rawUser) {
+            const parsed = JSON.parse(rawUser)
+            if (parsed && parsed.id) {
+              form.append('uploaded_by', String(parsed.id))
+            }
+          }
+        } catch {
+          // user 정보 파싱 실패해도 업로드는 진행
+        }
+
         try {
           setLoading(true)
           await apiFetch('/uploads', {
@@ -519,6 +617,20 @@ export default function UploadPage() {
           })
           // 업로드가 완료된 뒤에만 목록을 갱신해서 카드가 생성되도록
           await fetchUploads()
+
+          // 🔹 목록 갱신 후, 가장 최근 업로드 카드의 상세 편집 + AI 분석 자동 시작
+          const all = Array.isArray(uploadsCache) ? uploadsCache : []
+          if (all.length > 0) {
+            const sorted = [...all].sort((a, b) => {
+              const ad = new Date(a.uploaded_at || a.created_at || 0).getTime()
+              const bd = new Date(b.uploaded_at || b.created_at || 0).getTime()
+              return bd - ad
+            })
+            const newest = sorted[0]
+            if (newest) {
+              openDetail(newest)
+            }
+          }
         } catch (e) {
           console.error(e)
           setError('파일 업로드 중 오류가 발생했습니다.')
@@ -590,9 +702,41 @@ export default function UploadPage() {
       let students = []
 
       const fromEntries = Array.isArray(serverLogEntries) ? serverLogEntries : []
+
+      // 🔹 날짜 / 날짜별 raw text 구성
+      const dateSet = new Set()
+      const rawTextByDate = {}
+
+      fromEntries.forEach(entry => {
+        const dateValue = entry.log_date || entry.activity_date || entry.date
+        const dateKey = dateValue ? String(dateValue).slice(0, 10) : null
+        if (!dateKey) return
+
+        dateSet.add(dateKey)
+
+        const snippet =
+          entry.log_content ||
+          entry.raw_text ||
+          ''
+
+        if (!snippet) return
+
+        if (!rawTextByDate[dateKey]) {
+          rawTextByDate[dateKey] = snippet
+        } else {
+          rawTextByDate[dateKey] = `${rawTextByDate[dateKey]}\n\n${snippet}`
+        }
+      })
+
+      const dates = Array.from(dateSet).sort()
+      const activeDate = dates[0] || null
+
       const entryStudents = fromEntries.map((entry, idx) => ({
         id: String(entry.student_id || entry.student?.id || `stu-entry-${idx + 1}`),
-        name: entry.student_name || entry.student?.name || `학생 ${idx + 1}`,
+        name:
+          entry.student_name ||
+          entry.student?.name ||
+          `학생 ${idx + 1}`,
       }))
 
       const explicitStudents = Array.isArray(serverStudents)
@@ -678,6 +822,9 @@ export default function UploadPage() {
           loading: false,
           upload: hydrated,
           editedText: initialText,
+          dates,
+          activeDate,
+          rawTextByDate,
           students,
           activeStudentId,
           analysisByStudent,
@@ -1154,6 +1301,7 @@ export default function UploadPage() {
             prev.upload.raw_text ||
             prev.upload.analysis?.rawTextCleaned ||
             '',
+          isAiGenerated: true,
         }
 
         analysisByStudent[stuId] = {
@@ -1175,19 +1323,16 @@ export default function UploadPage() {
     })
   }
 
-  async function handleRunAiExtraction() {
-    if (!detail.upload || aiLoading) return
+async function handleRunAiExtraction() {
+  if (!detail.upload || aiLoading) return
 
-    const sourceText =
-      (detail.editedText && detail.editedText.trim()) ||
-      detail.upload.raw_text ||
-      detail.upload.analysis?.rawTextCleaned ||
-      ''
+  // 🔹 현재 선택된 날짜 기준 텍스트 사용
+  const sourceText = getCurrentRawText(detail)
 
-    if (!sourceText) {
-      alert('분석할 텍스트가 없습니다. 먼저 업로드 텍스트를 불러오거나 작성해 주세요.')
-      return
-    }
+  if (!sourceText) {
+    alert('분석할 텍스트가 없습니다. 먼저 업로드 텍스트를 불러오거나 작성해 주세요.')
+    return
+  }
 
     try {
       setAiLoading(true)
@@ -1282,18 +1427,22 @@ export default function UploadPage() {
       return
     }
 
-    const rawText =
-      (detail.editedText && detail.editedText.trim()) ||
-      detail.upload.raw_text ||
-      detail.upload.analysis?.rawTextCleaned ||
-      ''
+ const baseRawText =
+    (detail.editedText && detail.editedText.trim()) ||
+    detail.upload.raw_text ||
+    detail.upload.analysis?.rawTextCleaned ||
+    ''
 
-    const todayStr = new Date().toISOString().slice(0, 10)
+  const dates = detail.dates || []
+  const rawByDate = detail.rawTextByDate || {}
+  const hasDateTabs = dates.length > 0
 
-    const logEntries = (detail.students || []).map(stu => {
-      const state = detail.analysisByStudent?.[stu.id] || {}
-      const analysis = state.analysis || {}
-      const activityTypes = state.activityTypes || buildActivityTypeState()
+  const todayStr = new Date().toISOString().slice(0, 10)
+
+  const logEntries = (detail.students || []).map(stu => {
+    const state = detail.analysisByStudent?.[stu.id] || {}
+    const analysis = state.analysis || {}
+    const activityTypes = state.activityTypes || buildActivityTypeState()
 
       const selectedActivityLabels = Object.entries(activityTypes)
         .filter(([, item]) => item.selected)
@@ -1313,6 +1462,10 @@ export default function UploadPage() {
         detail.upload?.uploaded_at ||
         detail.upload?.created_at ||
         todayStr
+      
+      const dateKey = logDate ? String(logDate).slice(0, 10) : null
+      const logContent =
+      (hasDateTabs && dateKey && rawByDate[dateKey]) || baseRawText
 
       const relatedMetrics = {
         duration_minutes: durationMinutes || null,
@@ -1323,6 +1476,9 @@ export default function UploadPage() {
         ability: Array.isArray(analysis.ability) ? analysis.ability : [],
         score: typeof analysis.score === 'number' ? analysis.score : null,
         score_explanation: analysis.scoreExplanation || '',
+        emotionTags,
+        emotionSummary: analysis.emotionSummary || '',
+        isAiGenerated: !!analysis.isAiGenerated,
       }
 
       return {
@@ -1332,15 +1488,15 @@ export default function UploadPage() {
         emotion_tag: analysis.emotionSummary || '',
         emotion_tags: emotionTags,
         activity_tags: selectedActivityLabels,
-        log_content: rawText,
+        // 🔹 날짜별 텍스트 저장
+        log_content: logContent,
         related_metrics: relatedMetrics,
       }
     })
-
     const payload = {
       upload_id: detail.upload.id,
       file_name: detail.upload.file_name,
-      raw_text: rawText,
+      raw_text: baseRawText,
       log_entries: logEntries,
     }
 
@@ -1575,9 +1731,19 @@ export default function UploadPage() {
               <div key={upload.id} className={shellClass}>
                 <div className="upload-card-shell-header">
                   <div>
-                    <p className="card-title-main">{upload.file_name}</p>
+                    <p className="card-title-main">
+                      {formatDate(upload.uploaded_at) || '업로드일 미상'} · 업로드ID{' '}
+                      {upload.id ? String(upload.id).slice(0, 8) : '-'} · 사용자{' '}
+                      {upload.uploader_name || '알 수 없음'}
+                    </p>
                     <p className="card-subtitle">
-                      {upload.student_name} · 업로드 {formatDate(upload.uploaded_at)}
+                      {upload.file_name}
+                      {upload.student_name && (
+                        <>
+                          <span className="meta-sep">·</span>
+                          <span>대표 학생 {upload.student_name}</span>
+                        </>
+                      )}
                       {activityDate && (
                         <>
                           <span className="meta-sep">·</span>
@@ -1678,14 +1844,14 @@ export default function UploadPage() {
                 </p>
               </div>
               <div className="detail-header-actions">
-                <button
-                  type="button"
-                  className="btn secondary"
-                  onClick={handleRunAiExtraction}
-                  disabled={aiLoading}
-                >
-                  {aiLoading ? 'AI 분석 중...' : 'AI로 자동 분석'}
-                </button>
+                {aiLoading && (
+                  <span
+                    className="muted"
+                    style={{ marginRight: 8, fontSize: 12 }}
+                  >
+                    AI가 자동으로 분석 중입니다...
+                  </span>
+                )}
                 <button
                   type="button"
                   className="btn secondary"
@@ -1713,64 +1879,51 @@ export default function UploadPage() {
             )}
 
             <div
-              className="student-tabs-row"
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: 12,
-                marginBottom: 8,
-              }}
+             className="student-tabs-row"
+             style={{
+               display: 'flex',
+               justifyContent: 'space-between',
+               alignItems: 'center',
+               gap: 12,
+               marginBottom: 8,
+             }}
             >
-              <div
-                className="student-tabs"
-                style={{
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  gap: 8,
-                }}
-              >
-                {(detail.students || []).map(stu => {
-                  const isActive = stu.id === detail.activeStudentId
-                  const baseClass = 'emotion-chip'
-                  const activeClass = isActive
-                    ? 'emotion-chip-selected'
-                    : 'emotion-chip-unselected'
-                  return (
-                    <button
-                      key={stu.id}
-                      type="button"
-                      className={`${baseClass} ${activeClass} student-tab`}
-                      onClick={() => handleSelectStudent(stu.id)}
-                    >
-                      <span className="emotion-chip-label">{stu.name}</span>
-                      <span
-                        className="emotion-chip-icon"
-                        style={{ marginLeft: 4 }}
-                        onClick={e => {
-                          e.stopPropagation()
-                          handleRemoveStudent(stu.id)
-                        }}
-                      >
-                        ×
-                      </span>
-                    </button>
-                  )
-                })}
-                {(!detail.students || detail.students.length === 0) && (
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    아직 등록된 학생이 없습니다.
-                  </span>
-                )}
-              </div>
-              <button
-                type="button"
-                className="btn ghost small"
-                onClick={handleAddStudent}
-              >
-                + 학생 추가
-              </button>
+            <div
+               className="student-tabs"
+               style={{
+                 display: 'flex',
+                 flexWrap: 'wrap',
+                 gap: 8,
+               }}
+              > 
+               {(detail.dates || []).map(dateStr => {
+                 const isActive = dateStr === detail.activeDate
+                 const baseClass = 'emotion-chip'
+                 const activeClass = isActive
+                   ? 'emotion-chip-selected'
+                   : 'emotion-chip-unselected'
+
+                 return (
+                   <button
+                     key={dateStr}
+                     type="button"
+                     className={`${baseClass} ${activeClass} date-tab`}
+                     onClick={() => handleSelectDate(dateStr)}
+                   >
+                     <span className="emotion-chip-label">
+                       {formatDate(dateStr)}
+                     </span>
+                   </button>
+                 )
+               })}
+               {(!detail.dates || detail.dates.length === 0) && (
+                 <span className="muted" style={{ fontSize: 12 }}>
+                   날짜 정보가 없습니다.
+                 </span>
+               )}
+             </div>
             </div>
+
 
             {/* Supabase 학생 선택 드롭다운 (버튼 바로 아래 위치) */}
             {studentPickerOpen && (
@@ -1791,11 +1944,18 @@ export default function UploadPage() {
                   onChange={e => setStudentPickerValue(e.target.value)}
                 >
                   <option value="">학생 선택</option>
-                  {studentsMaster.map(stu => (
-                    <option key={stu.id} value={stu.id}>
-                      {stu.name}
-                    </option>
-                  ))}
+                  {studentsMaster
+                    .filter(stu => {
+                      const selected = (detail.students || []).some(
+                        s => String(s.id) === String(stu.id),
+                      )
+                      return !selected
+                    })
+                    .map(stu => (
+                      <option key={stu.id} value={stu.id}>
+                        {stu.name}
+                      </option>
+                    ))}
                 </select>
                 <button
                   type="button"
@@ -1824,13 +1984,30 @@ export default function UploadPage() {
                       <br></br>
                       <textarea
                         className="detail-textarea"
-                        value={detail.editedText}
+                        value={getCurrentRawText(detail)}
                         onChange={e =>
-                          setDetail(prev => ({
-                            ...prev,
-                            editedText: e.target.value,
-                            saved: false,
-                          }))
+                          setDetail(prev => {
+                            const next = { ...prev, saved: false }
+                            const dates = prev.dates || []
+                            const activeDate = prev.activeDate
+                            const rawByDate = { ...(prev.rawTextByDate || {}) }
+
+                            if (dates.length > 0 && activeDate) {
+                              // 날짜별 텍스트 편집
+                              rawByDate[activeDate] = e.target.value
+                              next.rawTextByDate = rawByDate
+
+                              // 날짜가 하나만 있을 때는 editedText도 동기화
+                              if (dates.length === 1) {
+                                next.editedText = e.target.value
+                              }
+                            } else {
+                              // 날짜 탭이 없으면 전체 텍스트만 사용
+                              next.editedText = e.target.value
+                            }
+
+                            return next
+                          })
                         }
                         placeholder="원본 텍스트를 편집하여 저장할 수 있습니다."
                       />
@@ -1866,9 +2043,125 @@ export default function UploadPage() {
                             </p>
                           </div>
 
+                          {/* 🔹 학생 태그 & 학생 추가 */}
+                          <div
+                            className="student-tabs-row"
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 12,
+                              marginBottom: 8,
+                            }}
+                          >
+                            <div
+                              className="student-tabs"
+                              style={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                gap: 8,
+                             }}
+                            >
+                              {(detail.students || []).map(stu => {
+                                const isActive = stu.id === detail.activeStudentId
+                                const baseClass = 'emotion-chip'
+                                const activeClass = isActive
+                                  ? 'emotion-chip-selected'
+                                  : 'emotion-chip-unselected'
+                                return (
+                                  <button
+                                    key={stu.id}
+                                    type="button"
+                                    className={`${baseClass} ${activeClass} student-tab`}
+                                    onClick={() => handleSelectStudent(stu.id)}
+                                  >
+                                    <span className="emotion-chip-label">{stu.name}</span>
+                                    <span
+                                      className="emotion-chip-icon"
+                                      style={{ marginLeft: 4 }}
+                                      onClick={e => {
+                                        e.stopPropagation()
+                                        handleRemoveStudent(stu.id)
+                                      }}
+                                    >
+                                      ×
+                                    </span>
+                                  </button>
+                                )
+                              })}
+                              {(!detail.students || detail.students.length === 0) && (
+                                <span className="muted" style={{ fontSize: 12 }}>
+                                  아직 등록된 학생이 없습니다.
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              className="btn ghost small"
+                              onClick={handleAddStudent}
+                            >
+                              + 학생 추가
+                            </button>
+                          </div>
+
+                          {/* 🔹 Supabase 학생 선택 드롭다운 (학생 추가 버튼 바로 아래) */}
+                          {studentPickerOpen && (
+                            <div
+                              className="student-picker-row"
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'flex-end',
+                                alignItems: 'center',
+                                gap: 8,
+                                marginBottom: 12,
+                              }}
+                            >
+                              <select
+                                className="analysis-input"
+                                style={{ maxWidth: 260 }}
+                                value={studentPickerValue}
+                                onChange={e => setStudentPickerValue(e.target.value)}
+                              >
+                               <option value="">학생 선택</option>
+                                {studentsMaster
+                                  .filter(stu => {
+                                    const selected = (detail.students || []).some(
+                                      s => String(s.id) === String(stu.id),
+                                    )
+                                    // 🔹 이미 태그된 학생은 제외
+                                    return !selected
+                                  })
+                                  .map(stu => (
+                                    <option key={stu.id} value={stu.id}>
+                                      {stu.name}
+                                    </option>
+                                  ))}
+                              </select>
+                              <button
+                                type="button"
+                                className="btn secondary small"
+                                onClick={handleAddStudentFromPicker}
+                              >
+                                추가
+                              </button>
+                            </div>
+                          )}
                           <div className="analysis-scroll-panel">
                             <div className="analysis-section">
-                              <h5>활동 기본 정보</h5>
+                              <div className="analysis-section-head">
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                  }}
+                                >
+                                  <h5>활동 기본 정보</h5>
+                                  {a.isAiGenerated && (
+                                    <span className="badge badge-warning">AI</span>
+                                  )}
+                                </div>
+                              </div>
                               <div className="analysis-grid">
                                 <label>학생</label>
                                 <div className="analysis-input-static">
@@ -1944,7 +2237,7 @@ export default function UploadPage() {
                                     })
                                   }
                                 />
-                                <label>비고</label>
+                                <label>특이사항</label>
                                 <input
                                   type="text"
                                   className="analysis-input"
@@ -1961,7 +2254,18 @@ export default function UploadPage() {
                             <div className="analysis-section">
                               <div className="analysis-section-head">
                                 <div>
-                                  <h5>감정 키워드</h5>
+                                  <div
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: 8,
+                                    }}
+                                  >
+                                    <h5>감정 키워드</h5>
+                                    {a.isAiGenerated && (
+                                      <span className="badge badge-warning">AI</span>
+                                    )}
+                                  </div>
                                   <p className="section-helper">
                                     현재 학생에 해당하는 감정 키워드를 선택하거나 직접
                                     추가할 수 있습니다. 저장 시 분석/리포트에 활용됩니다.
@@ -1981,7 +2285,18 @@ export default function UploadPage() {
                             <div className="analysis-section">
                               <div className="analysis-section-head">
                                 <div>
-                                  <h5>활동 유형 선택 (중복 선택 가능)</h5>
+                                  <div
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: 8,
+                                    }}
+                                  >
+                                    <h5>활동 유형 선택 (중복 선택 가능)</h5>
+                                    {a.isAiGenerated && (
+                                      <span className="badge badge-warning">AI</span>
+                                    )}
+                                  </div>
                                   <p className="section-helper">
                                     체크된 활동 유형은 현재 학생의 활동 기록 통계에
                                     반영됩니다.

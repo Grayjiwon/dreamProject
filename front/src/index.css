@@ -4365,3 +4365,246 @@ button:hover {
   margin-top: 4px;
 }
 
+/* 2-컬럼 레이아웃: 왼쪽 대시보드 / 오른쪽 채팅 */
+.dashboard-split-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(0, 1.2fr);
+  gap: 20px;
+  align-items: flex-start;
+}
+
+/* 왼쪽 컬럼 스크롤 시, 오른쪽 채팅은 고정 비슷하게 상단에 붙어 있도록 */
+.dashboard-main-column {
+  min-width: 0;
+}
+
+.dashboard-chat-column {
+  min-width: 0;
+  position: sticky;
+  top: 80px; /* TopNav 높이에 맞게 필요하면 조정 */
+}
+
+/* 학생/기간 선택 카드가 스크롤 시 뒷배경이 비치지 않도록 sticky + z-index */
+.dashboard-filter-card {
+  position: sticky;
+  top: 80px; /* TopNav 높이에 맞게 조정 */
+  z-index: 5;
+  background: #ffffff;
+  border-radius: 16px;
+}
+
+/* 기존 카드 스타일과 자연스럽게 맞추기 위한 기본값 (필요 시 조정) */
+.dashboard-filter-card,
+.dashboard-card {
+  backdrop-filter: blur(4px);
+}
+
+/* AI 채팅 패널 */
+.dashboard-chat-window {
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  padding: 16px 16px 12px;
+  max-height: calc(100vh - 120px);
+}
+
+.dashboard-chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.dashboard-chat-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.dashboard-chat-subtitle {
+  font-size: 12px;
+  color: #6b7280;
+  margin-top: 2px;
+}
+
+/* 채팅 본문 영역 스크롤 */
+.dashboard-chat-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.dashboard-chat-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 0;
+  gap: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-message {
+  display: flex;
+  margin-bottom: 4px;
+}
+
+.chat-message-user {
+  justify-content: flex-end;
+}
+
+.chat-message-assistant {
+  justify-content: flex-start;
+}
+
+.chat-message-bubble {
+  max-width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.chat-message-user .chat-message-bubble {
+  background: #e0f2fe;
+  border-top-right-radius: 2px;
+}
+
+.chat-message-assistant .chat-message-bubble {
+  background: #f3f4f6;
+  border-top-left-radius: 2px;
+}
+
+.dashboard-chat-input-row {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+.dashboard-chat-input {
+  flex: 1;
+  resize: none;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid #e5e7eb;
+}
+
+.chat-send-btn {
+  white-space: nowrap;
+  height: 36px;
+  align-self: flex-end;
+}
+
+.chat-empty {
+  font-size: 12px;
+}
+
+/* 빠른 기간 선택 버튼 */
+.calendar-quick-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  margin-bottom: 8px;
+  gap: 8px;
+}
+
+.calendar-quick-label {
+  font-size: 12px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.calendar-quick-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.quick-range-btn {
+  border-radius: 999px;
+  border: 1px solid #e5e7eb;
+  padding: 4px 8px;
+  font-size: 11px;
+  background: #f9fafb;
+  cursor: pointer;
+}
+
+.quick-range-btn.active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+/* 기록이 있는 날짜 dot 리스트 */
+.calendar-dots-section {
+  margin-top: 10px;
+  margin-bottom: 6px;
+}
+
+.calendar-dots-title {
+  font-size: 11px;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.calendar-dots-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.calendar-dot-item {
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #f3f4f6;
+}
+
+.calendar-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #10b981; /* 기록 있음 dot 색 */
+}
+
+.calendar-dots-empty {
+  font-size: 11px;
+}
+
+/* 반응형: 화면이 좁을 때는 위아래로 쌓이도록 */
+@media (max-width: 1024px) {
+  .dashboard-split-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dashboard-chat-column {
+    position: static;
+  }
+
+  .dashboard-filter-card {
+    top: 0;
+  }
+
+  .dashboard-chat-window {
+    max-height: none;
+  }
+}
+
+.student-tab.emotion-chip-selected {
+  background: var(--color-primary);
+  color: var(--bg-white);
+}
+
+/* 비선택 학생 태그 */
+.student-tab.emotion-chip-unselected {
+  background: var(--bg-blue-pale);
+  color: var(--text-blue-dark);
+}

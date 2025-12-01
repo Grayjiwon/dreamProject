@@ -221,6 +221,8 @@ export default function TopNav() {
             onKeyDown={e => {
               if (e.key === 'Enter' || e.key === ' ') navigate('/upload')
             }}
+            // 변경: 마우스 포인터 스타일 추가
+            style={{ cursor: 'pointer' }}
           >
             꿈이자라는뜰
           </div>
@@ -233,7 +235,13 @@ export default function TopNav() {
           <NavTab to="/students" label="관리자" isActive={isAdmin} />
         </nav>
 
-        <div className="top-nav-right">
+        {/* 변경: flex 스타일 추가 및 로그인 사용자 메시지 표시 */}
+        <div className="top-nav-right" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {user && (
+            <span style={{ fontSize: '14px', color: '#333' }}>
+              {user.display_name || user.name || '사용자'}님이 로그인하셨습니다
+            </span>
+          )}
           <button
             className="avatar-btn"
             aria-label="내 계정"

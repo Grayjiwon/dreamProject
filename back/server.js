@@ -1,4 +1,5 @@
-﻿require('dotenv').config()
+﻿// back/server.js
+require('dotenv').config()
 const express = require('express')
 const { supabase } = require('./supabaseClient')
 const multer = require('multer')
@@ -220,6 +221,14 @@ app.post(
       const now = new Date().toISOString()
       const storageKey = `uploads/${Date.now()}-${originalName}`
 
+      // 변경: FormData 에서 넘어온 uploaded_by 를 ingest_uploads 에 기록
+      const uploadedBy =
+        (req.body &&
+          (req.body.uploaded_by ||
+            req.body.user_id ||
+            req.body.uploader_id)) ||
+        null
+
       // 1) ingest_uploads 에 메타데이터 저장
       const { data, error } = await supabase
         .from('ingest_uploads')
@@ -228,7 +237,7 @@ app.post(
             file_name: originalName,
             storage_key: storageKey,
             student_id: null,
-            uploaded_by: null, // 로그인 유저와 연결하려면 Authorization 헤더에서 id를 꺼내서 넣으면 됨
+            uploaded_by: uploadedBy,
             status: 'queued',
             progress: 0,
             error: null,
@@ -244,12 +253,13 @@ app.post(
         return res.status(500).json({ message: 'DB Error', error })
       }
 
-      // 2) 업로드된 파일에서 원본 텍스트 추출
+      // 2) 업로드된 파일에서 원본 텍스트 추출 (동기적으로 수행하여 파이프라인 보장)
       let rawText = null
       try {
         rawText = await extractPlainTextFromFile(file)
       } catch (e) {
         console.error('extractPlainTextFromFile 에러:', e)
+        // 텍스트 추출 실패해도 업로드는 성공으로 처리하되 에러 로그 남김
       }
 
       // 3) 추출된 텍스트가 있으면 ingest_uploads.raw_text 에 저장
@@ -274,7 +284,7 @@ app.post(
         }
       }
 
-      // 4) 최종 응답
+      // 4) 최종 응답 (raw_text 포함)
       return res.status(201).json(data)
     } catch (e) {
       console.error('POST /uploads 에러:', e)
@@ -287,14 +297,16 @@ app.post(
 
 /**
  * GET /uploads, /api/uploads
- * - ingest_uploads + students 를 조합해서
+ * - ingest_uploads + students + user_profiles 를 조합해서
  *   UploadPage.jsx 의 hydrateUpload 가 이해할 수 있는 형태로 반환
  */
 app.get(['/uploads', '/api/uploads'], async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('ingest_uploads')
-      .select('id, file_name, status, progress, error, created_at, student_id')
+      .select(
+        'id, file_name, status, progress, error, created_at, student_id, uploaded_by',
+      )
       .order('created_at', { ascending: false })
 
     if (error) {
@@ -302,7 +314,12 @@ app.get(['/uploads', '/api/uploads'], async (req, res) => {
       return res.status(500).json({ message: 'DB Error', error })
     }
 
-    const studentIds = [...new Set(data.map(u => u.student_id).filter(Boolean))]
+    const uploadsRaw = data || []
+
+    // student_id → 학생 이름
+    const studentIds = [
+      ...new Set(uploadsRaw.map(u => u.student_id).filter(Boolean)),
+    ]
 
     let studentsById = {}
     if (studentIds.length > 0) {
@@ -318,7 +335,28 @@ app.get(['/uploads', '/api/uploads'], async (req, res) => {
       }
     }
 
-    const uploads = data.map(u => ({
+    // uploaded_by → user_profiles.display_name
+    const uploaderIds = [
+      ...new Set(uploadsRaw.map(u => u.uploaded_by).filter(Boolean)),
+    ]
+    let uploaderById = {}
+    if (uploaderIds.length > 0) {
+      const { data: profiles, error: pErr } = await supabase
+        .from('user_profiles')
+        .select('id, display_name')
+        .in('id', uploaderIds)
+
+      if (pErr) {
+        console.error('user_profiles 조회 에러:', pErr)
+      } else if (profiles) {
+        uploaderById = Object.fromEntries(
+          profiles.map(p => [p.id, p.display_name || '']),
+        )
+      }
+    }
+
+    // 업로더(User) 이름은 프론트에서 카드 제목에 사용
+    const uploads = uploadsRaw.map(u => ({
       id: u.id,
       file_name: u.file_name,
       status: u.status,
@@ -326,6 +364,8 @@ app.get(['/uploads', '/api/uploads'], async (req, res) => {
       error: u.error,
       created_at: u.created_at,
       uploaded_at: u.created_at,
+      uploaded_by: u.uploaded_by,
+      uploader_name: uploaderById[u.uploaded_by] || null,
       student_id: u.student_id,
       student_name: studentsById[u.student_id] || '학생 미확인',
     }))
@@ -342,7 +382,7 @@ app.get(['/uploads', '/api/uploads'], async (req, res) => {
 /**
  * GET /uploads/:id, /api/uploads/:id
  * - ingest_uploads 1건 + log_entries 를 함께 내려주면서
- *   raw_text 를 log_content 기반으로 만들어서 반환
+ *   raw_text 와 학생 이름, 관련 분석 값을 싱크
  */
 app.get(['/uploads/:id', '/api/uploads/:id'], async (req, res) => {
   const { id } = req.params
@@ -362,10 +402,12 @@ app.get(['/uploads/:id', '/api/uploads/:id'], async (req, res) => {
         .json({ message: '업로드를 찾을 수 없습니다.' })
     }
 
-    // 2) 이 업로드와 연결된 log_entries 조회
+    // 2) 이 업로드와 연결된 log_entries + 학생 이름 join
     const { data: logs, error: logsErr } = await supabase
       .from('log_entries')
-      .select('*')
+      .select(
+        'id, log_date, student_id, emotion_tag, activity_tags, log_content, related_metrics, source_file_path, student:students(name)',
+      )
       .eq('source_file_path', upload.file_name)
       .order('log_date', { ascending: true })
 
@@ -382,11 +424,25 @@ app.get(['/uploads/:id', '/api/uploads/:id'], async (req, res) => {
     }
 
     // 4) UploadPage 상세에서 저장된 분석 값이 다시 열었을 때 보이도록
-    //    related_metrics → analysis 로 매핑해서 내려준다.
-    const logEntries = logEntriesRaw.map(entry => ({
-      ...entry,
-      analysis: entry.related_metrics || entry.analysis || {},
-    }))
+    //    related_metrics(jsonb[]) → analysis 로 매핑 + student_name 주입
+    const logEntries = logEntriesRaw.map(entry => {
+      const rmRaw = entry.related_metrics
+      const analysis =
+        Array.isArray(rmRaw) && rmRaw.length > 0
+          ? rmRaw[0] || {}
+          : rmRaw || entry.analysis || {}
+
+      const studentName =
+        entry.student_name ||
+        (entry.student && entry.student.name) ||
+        null
+
+      return {
+        ...entry,
+        student_name: studentName,
+        analysis,
+      }
+    })
 
     return res.json({
       ...upload,
@@ -444,8 +500,13 @@ app.delete(['/uploads/:id', '/api/uploads/:id'], async (req, res) => {
  *       log_date: "2025-11-21",
  *       emotion_tag: "기쁨",
  *       activity_tags: ["미술", "글쓰기"],
+ *       emotion_tags: ["즐거움", "설렘"],
  *       log_content: "...",
- *       related_metrics: { score: 85, minutes: 30 }
+ *       related_metrics: {
+ *         duration_minutes: 30,
+ *         activity_name: "...",
+ *         ...
+ *       }
  *     },
  *     ...
  *   ]
@@ -507,10 +568,8 @@ app.post(['/uploads/:id/log', '/api/uploads/:id/log'], async (req, res) => {
 
       if (namesToCreate.length > 0) {
         const payload = namesToCreate.map(name => ({
-          // students 테이블에서 name만 NOT NULL, 나머지는 null/default 허용
+          // students 테이블에서 name만 NOT NULL, 나머지는 null/default 허용:contentReference[oaicite:0]{index=0}
           name,
-          // 필요하면 주석 풀어서 메모 남길 수 있음
-          // notes: 'AI 업로드에서 자동 생성된 학생입니다.',
         }))
 
         const { data: insertedStudents, error: createErr } = await supabase
@@ -566,20 +625,18 @@ app.post(['/uploads/:id/log', '/api/uploads/:id/log'], async (req, res) => {
         if (metrics == null) {
           metrics = null
         } else if (Array.isArray(metrics)) {
-          // 이미 배열이면 그대로 사용
           metrics = metrics
         } else {
-          // 객체 하나면 [ { ... } ] 로 감싸서 jsonb[] 타입에 맞춤
           metrics = [metrics]
         }
 
         return {
           log_date: e.log_date || new Date().toISOString().slice(0, 10),
-          student_id: studentId, // ✅ log_entries.student_id (uuid NOT NULL) 만족
+          student_id: studentId, // log_entries.student_id (uuid NOT NULL)
           emotion_tag: e.emotion_tag || null,
           activity_tags: activityTags.length > 0 ? activityTags : null, // text[]
           log_content: e.log_content || null,
-          related_metrics: metrics, // ✅ 이제 항상 jsonb[] 형식
+          related_metrics: metrics, // jsonb[]
           source_file_path: file_name || null,
         }
       })
@@ -591,7 +648,15 @@ app.post(['/uploads/:id/log', '/api/uploads/:id/log'], async (req, res) => {
         .json({ message: '학생 정보가 있는 기록이 없습니다.' })
     }
 
-    // 6) log_entries insert
+    // 6) source_file_path 기준으로 기존 로그를 삭제하고 새로 저장 (overwrite)
+    if (file_name) {
+      await supabase
+        .from('log_entries')
+        .delete()
+        .eq('source_file_path', file_name)
+    }
+
+    // 7) log_entries insert
     const { data: inserted, error: insertErr } = await supabase
       .from('log_entries')
       .insert(rows)
@@ -605,7 +670,7 @@ app.post(['/uploads/:id/log', '/api/uploads/:id/log'], async (req, res) => {
       })
     }
 
-    // 7) ingest_uploads 의 student_id / status 업데이트
+    // 8) ingest_uploads 의 student_id / status 업데이트
     const firstStudentId = rows[0].student_id
 
     const { error: upErr } = await supabase
@@ -1505,7 +1570,7 @@ ${historyText || '(이전 대화 없음)'}
     }
 
     const geminiUrl =
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent' +
+      '[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent)' +
       `?key=${process.env.GEMINI_API_KEY}`
 
     const body = {
