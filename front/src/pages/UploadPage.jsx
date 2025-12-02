@@ -636,70 +636,75 @@ export default function UploadPage() {
     detail.autoAiRequested,
   ])
 
-// ---------- 파일 업로드 ----------
+// ---------- 파일 업로드 (병렬 처리 & 즉시 갱신 개선) ----------
 
   async function handleFiles(files) {
     const list = Array.from(files || [])
     if (list.length === 0) return
-    if (uploading) return
+    
+    // 1. uploading 락 제거 (여러 번 드래그 허용)
+    // 대신 UI에 로딩 인디케이터를 위해 카운트나 상태를 다르게 관리할 수 있으나,
+    // 여기서는 단순화를 위해 uploading 상태는 '최소 하나라도 업로드 중이면 true'로 유지하되
+    // 진입 차단(if uploading return)은 제거했습니다.
+    
+    setUploading(true) 
+    setError('') // 전역 에러 초기화 (개별 에러는 로그로 처리 권장)
 
-    setError('')
-    setUploading(true)
+    // 2. 병렬 업로드 처리
+    const uploadPromises = list.map(async (file) => {
+      const form = new FormData()
+      form.append('file', file)
+
+      try {
+        const rawUser = localStorage.getItem('user')
+        if (rawUser) {
+          const parsed = JSON.parse(rawUser)
+          if (parsed?.id) form.append('uploaded_by', String(parsed.id))
+        }
+      } catch { /* ignore */ }
+
+      try {
+        // 개별 파일 업로드 요청
+        await apiFetch('/uploads', {
+          method: 'POST',
+          body: form,
+          _formName: file.name,
+        })
+        
+        // 3. 하나 완료될 때마다 목록 갱신 (UX 향상)
+        // (너무 빈번한 호출이 부담된다면 Promise.all 이후로 옮겨도 됨)
+        await fetchUploads() 
+        
+      } catch (e) {
+        console.error(`파일 업로드 실패 (${file.name}):`, e)
+        // 여기서 alert를 띄우면 사용자 경험을 해칠 수 있으므로 에러 로그만 남기거나
+        // 별도의 '실패한 파일 목록' 상태를 관리하는 것이 좋습니다.
+      }
+    })
 
     try {
-      for (const file of list) {
-        const form = new FormData()
-        form.append('file', file)
-
-        try {
-          const rawUser = localStorage.getItem('user')
-          if (rawUser) {
-            const parsed = JSON.parse(rawUser)
-            if (parsed && parsed.id) {
-              form.append('uploaded_by', String(parsed.id))
-            }
-          }
-        } catch {
-          // user 정보 파싱 실패 무시
-        }
-
-        try {
-          setLoading(true)
-          await apiFetch('/uploads', {
-            method: 'POST',
-            body: form,
-            _formName: file.name,
-          })
-        } catch (e) {
-          console.error(e)
-          setError('파일 업로드 중 오류가 발생했습니다.')
-        } finally {
-          setLoading(false)
-        }
-      }
-
-      // 모든 파일 루프가 끝난 뒤 목록 갱신 및 자동 열기
-      await fetchUploads()
-
-      const all = uploadsCache || [] // fetchUploads가 갱신한 캐시 사용
+      setLoading(true) // 목록 로딩 표시
+      await Promise.all(uploadPromises) // 병렬 실행 대기
+      
+      // 4. 최종 정렬 및 최신 파일 열기
+      const all = uploadsCache || []
       if (all.length > 0) {
-        // 시간순 정렬 (최신순)
         const sorted = [...all].sort((a, b) => {
-          const ad = new Date(a.uploaded_at || a.created_at || 0).getTime()
-          const bd = new Date(b.uploaded_at || b.created_at || 0).getTime()
-          return bd - ad
+           const ad = new Date(a.uploaded_at || a.created_at || 0).getTime()
+           const bd = new Date(b.uploaded_at || b.created_at || 0).getTime()
+           return bd - ad
         })
         const newest = sorted[0]
-        if (newest) {
-          openDetail(newest)
-        }
+        // 방금 올린 파일이 있으면 열기 (선택 사항)
+        // if (newest) openDetail(newest) 
       }
-
+    } catch (err) {
+      console.error('업로드 프로세스 전체 에러:', err)
+      setError('일부 파일을 업로드하는 중 문제가 발생했습니다.')
     } finally {
+      setLoading(false)
       setUploading(false)
-      if (fileRef.current) {
-        fileRef.current.value = ''
-      }
+      if (fileRef.current) fileRef.current.value = ''
     }
   }
 
@@ -1477,10 +1482,12 @@ export default function UploadPage() {
     })
   }
 
+  // ---------- AI 수동/자동 실행 통합 함수 ----------
+
   async function handleRunAiExtraction() {
     if (!detail.upload || aiLoading) return
 
-    // 1. 현재 선택된 날짜 기준 텍스트 사용
+    // 1. 분석할 텍스트 가져오기 (현재 선택된 날짜 탭 기준)
     const sourceText = getCurrentRawText(detail)
 
     if (!sourceText) {
@@ -1528,87 +1535,15 @@ export default function UploadPage() {
       const records = res?.parsed?.records || res?.records || []
 
       if (!Array.isArray(records) || records.length === 0) {
-        alert('AI가 활동 기록을 찾지 못했습니다. 텍스트를 다시 확인해 주세요.')
+        // AI가 빈 결과를 줄 경우 조용히 넘어가거나 알림
+        console.warn('AI 분석 결과가 비어 있습니다.')
         return
       }
 
-      // 3. 분석 결과 UI 적용 (위의 함수 실행)
+      // 3. 분석 결과 UI 적용 (기존에 만든 applyAiExtraction 함수 활용)
       applyAiExtraction(records)
 
       // 진행률 업데이트: 완료 (100%)
-      if (currentUploadId) {
-        updateUploadSteps(currentUploadId, prevSteps => ({
-          ...prevSteps,
-          ai: 100,
-        }))
-      }
-    } catch (e) {
-      console.error(e)
-      setAiError('AI 분석 중 오류가 발생했습니다.')
-      alert('AI 분석 중 오류가 발생했습니다.')
-    } finally {
-      setAiLoading(false)
-      setAiRunningUploadId(null)
-    }
-  }
-
-  async function handleRunAiExtraction() {
-    if (!detail.upload || aiLoading) return
-
-    // 🔹 현재 선택된 날짜 기준 텍스트 사용
-    const sourceText = getCurrentRawText(detail)
-
-    if (!sourceText) {
-      alert('분석할 텍스트가 없습니다. 먼저 업로드 텍스트를 불러오거나 작성해 주세요.')
-      return
-    }
-
-    const currentUploadId = detail.upload.id
-
-    try {
-      setAiLoading(true)
-      setAiError('')
-      setAiRunningUploadId(currentUploadId)
-
-      // 1단계: AI 준비 시작
-      if (currentUploadId) {
-        updateUploadSteps(currentUploadId, prev => ({
-          ...prev,
-          ai: Math.max(prev.ai || 0, 20),
-        }))
-      }
-
-      // 2단계: Gemini API 호출 (데이터 전송)
-      if (currentUploadId) {
-        updateUploadSteps(currentUploadId, prev => ({
-          ...prev,
-          ai: Math.max(prev.ai || 0, 40),
-        }))
-      }
-
-      const res = await extractRecordsWithGemini({
-        raw_text: sourceText,
-        file_name: detail.upload.file_name,
-      })
-
-      // 3단계: AI가 결과를 정리하는 중
-      if (currentUploadId) {
-        updateUploadSteps(currentUploadId, prev => ({
-          ...prev,
-          ai: Math.max(prev.ai || 0, 70),
-        }))
-      }
-
-      const records = res?.parsed?.records || res?.records || []
-
-      if (!Array.isArray(records) || records.length === 0) {
-        alert('AI가 활동 기록을 찾지 못했습니다. 텍스트를 다시 확인해 주세요.')
-        return
-      }
-
-      applyAiExtraction(records)
-
-      // 4단계: AI 자동 분석 완료 → 100%
       if (currentUploadId) {
         updateUploadSteps(currentUploadId, prevSteps => ({
           ...prevSteps,

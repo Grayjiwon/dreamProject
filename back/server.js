@@ -42,20 +42,18 @@ function parseJsonFromText(text) {
 
 // -------------------- 업로드 자동 AI 분석 헬퍼 --------------------
 
-// ingest_uploads 한 건에 대해 Gemini로 records 추출만 수행하는 유틸
+// ingest_uploads 한 건에 대해 Gemini로 records 추출 후 "DB에 자동 저장"까지 수행
 async function runAutoExtractionForUpload(uploadRow, rawText) {
   if (!gemini) {
     console.warn('Gemini 미설정: 자동 AI 분석을 건너뜁니다.')
     return
   }
   if (!rawText || typeof rawText !== 'string') {
-    console.warn('raw_text 없음: 자동 AI 분석을 건너뜁니다.')
     return
   }
 
   try {
-    const modelName =
-      process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-flash'
+    const modelName = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-flash'
 
     const model = gemini.getGenerativeModel({
       model: modelName,
@@ -74,20 +72,125 @@ async function runAutoExtractionForUpload(uploadRow, rawText) {
       '\n\n[입력 JSON]\n' +
       JSON.stringify(input)
 
+    console.log(`[AUTO AI] 업로드 ${uploadRow.id} 분석 시작...`)
+    
     const result = await model.generateContent(prompt)
     const raw = result.response.text()
     const parsed = parseJsonFromText(raw)
 
-    const records = parsed && Array.isArray(parsed.records)
-      ? parsed.records
-      : []
+    const records = parsed && Array.isArray(parsed.records) ? parsed.records : []
 
     console.log(
-      `[AUTO AI] 업로드 ${uploadRow.id} (${uploadRow.file_name}) 분석 완료, records: ${records.length}개`,
+      `[AUTO AI] 업로드 ${uploadRow.id} 분석 완료, records: ${records.length}개`,
     )
 
-    // 필요하면 여기서 records 를 log_entries 행으로 변환해
-    // /uploads/:id/log 의 로직을 참고하여 DB에 바로 저장할 수도 있음.
+    if (records.length === 0) return
+
+    // -------------------------------------------------------
+    // [추가된 로직] 추출된 데이터를 log_entries 테이블에 저장
+    // -------------------------------------------------------
+    
+    // 1. 학생 처리 (이름 수집 -> ID 조회 -> 없으면 생성)
+    const nameSet = new Set()
+    records.forEach(r => {
+      if (r.student_name && typeof r.student_name === 'string') {
+        nameSet.add(r.student_name.trim())
+      }
+    })
+    
+    const namesList = Array.from(nameSet)
+    const nameToIdMap = {}
+
+    if (namesList.length > 0) {
+      // 기존 학생 조회
+      const { data: existing } = await supabase
+        .from('students')
+        .select('id, name')
+        .in('name', namesList)
+      
+      existing?.forEach(stu => {
+        nameToIdMap[stu.name] = stu.id
+      })
+
+      // 없는 학생 생성
+      const newNames = namesList.filter(n => !nameToIdMap[n])
+      if (newNames.length > 0) {
+        const { data: created } = await supabase
+          .from('students')
+          .insert(newNames.map(name => ({ name }))) // students 테이블 제약조건에 맞춰 수정 필요할 수 있음
+          .select('id, name')
+        
+        created?.forEach(stu => {
+          nameToIdMap[stu.name] = stu.id
+        })
+      }
+    }
+
+    // 2. log_entries 행(Row) 생성
+    const logRows = records.map(r => {
+      const sName = (r.student_name || '').trim()
+      const sId = nameToIdMap[sName] || null // 학생 ID가 없으면 null (나중에 매칭 필요)
+
+      // 감정 태그 처리
+      let emotionTags = []
+      let mainEmotion = ''
+      if (Array.isArray(r.emotions)) {
+        emotionTags = r.emotions.map(e => typeof e === 'string' ? e : e.label || '').filter(Boolean)
+        mainEmotion = emotionTags[0] || ''
+      }
+
+      // 활동 시간 처리
+      const minutes = (typeof r.minutes === 'number' ? r.minutes : 
+                      (typeof r.duration_minutes === 'number' ? r.duration_minutes : 
+                      (r.ability_analysis?.total_minutes || 0)))
+
+      // Related Metrics (JSON 구조)
+      const metrics = [{
+        duration_minutes: minutes,
+        activity_name: r.activity_title || '',
+        activity_type: r.activity_type || '',
+        note: r.teacher_comment || r.raw_activity_text || '',
+        level: r.ability_analysis?.level || '',
+        emotionTags: emotionTags,
+        emotionSummary: mainEmotion,
+        isAiGenerated: true
+      }]
+
+      return {
+        log_date: r.date || new Date().toISOString().slice(0, 10),
+        student_id: sId, // 만약 student table에 not null이면 문제가 될 수 있으니 주의
+        log_content: r.raw_activity_text || JSON.stringify(r),
+        emotion_tag: mainEmotion,
+        activity_tags: r.activity_type ? [r.activity_type] : [],
+        related_metrics: metrics,
+        source_file_path: uploadRow.file_name
+      }
+    }).filter(row => row.student_id) // 학생 ID가 있는 것만 저장 (안전장치)
+
+    if (logRows.length > 0) {
+      // 기존 로그 삭제 (중복 방지)
+      await supabase.from('log_entries').delete().eq('source_file_path', uploadRow.file_name)
+
+      // 새 로그 저장
+      const { error: insertErr } = await supabase.from('log_entries').insert(logRows)
+      
+      if (insertErr) {
+        console.error(`[AUTO AI] DB 저장 실패:`, insertErr)
+      } else {
+        console.log(`[AUTO AI] DB 저장 성공 (${logRows.length}건)`)
+        
+        // 3. 업로드 상태 완료로 업데이트
+        await supabase
+          .from('ingest_uploads')
+          .update({ 
+            status: 'success', 
+            progress: 100,
+            student_id: logRows[0].student_id // 대표 학생 ID 업데이트
+          })
+          .eq('id', uploadRow.id)
+      }
+    }
+
   } catch (e) {
     console.error(
       `[AUTO AI] 업로드 ${uploadRow.id} 자동 분석 중 오류:`,
