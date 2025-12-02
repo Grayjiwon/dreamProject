@@ -107,6 +107,15 @@ export default function Dashboard() {
   const [emotionModalOpen, setEmotionModalOpen] = useState(false)
   const [activityModalOpen, setActivityModalOpen] = useState(false)
 
+  // 기존 데모 데이터가 있다면 그대로 두고, 없으면 최소한의 기본값만
+  const demoMetrics = {
+    recordCount: 0,
+    averageScore: 0,
+  }
+  const demoEmotion = []
+  const demoActivitySeries = []
+  const demoActivityAbilityList = []
+
   // 채팅
   const [isChatOpen, setIsChatOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
@@ -295,53 +304,91 @@ export default function Dashboard() {
 
   // ---------- 데이터 로딩 ----------
 
+  // 학생 목록 불러오기
   async function fetchStudents() {
     try {
-      setError(null)
-      const res = await apiFetch('/api/students?limit=1000&offset=0', {
-        method: 'GET',
-      })
-      const unique = normalizeStudentsResponse(res)
-      setStudents(unique)
+      // /api/students 는 백엔드에서 Supabase students 테이블을 읽어오는 엔드포인트라고 가정
+      const res = await apiFetch('/api/students', { method: 'GET' })
+
+      // 서버 응답이 { count, items: [...] } 형태일 수 있으므로 처리
+      const list = Array.isArray(res) ? res : (res.items || [])
+
+      if (list.length > 0) {
+        // 예: [{ id: 'stu_1', name: '배짱(김배짱)' }, ...]
+        setStudents(list)
+        setSelectedStudentId(list[0].id)
+      } else {
+        setStudents([])
+        setSelectedStudentId(null)
+      }
     } catch (e) {
       console.error(e)
-      setError('학생 목록을 불러오는 중 오류가 발생했습니다.')
       setStudents([])
-      setSelectedStudentId('')
+      setSelectedStudentId(null)
     }
   }
 
-  async function fetchDashboardData({ studentId, startDate, endDate }) {
-    if (!studentId || !startDate || !endDate) return
-
+  // 대시보드 데이터 불러오기
+  async function fetchDashboardData({ studentId, from, to }) {
     setLoading(true)
     setError(null)
 
     try {
       const params = new URLSearchParams()
-      params.set('studentId', studentId)
-      params.set('startDate', startDate)
-      params.set('endDate', endDate)
+      params.set('studentId', studentId)  // ✅ 학생 아이디 기준
 
+      // 기간이 있을 때만 쿼리에 포함 (Supabase where date between ...)
+      if (from) params.set('from', from) // YYYY-MM-DD
+      if (to) params.set('to', to)
+
+      // 백엔드: 이 엔드포인트에서 Supabase로부터
+      // 해당 학생의 모든 활동 기록을 날짜 범위로 필터링하고 집계해서 반환
       const res = await apiFetch(`/api/dashboard?${params.toString()}`)
-      if (!res) throw new Error('대시보드 데이터를 불러오지 못했습니다.')
 
-      setMetrics({
-        recordCount: res.metrics?.recordCount ?? 0,
-      })
-      setEmotionData(asArray(res.emotionDistribution))
-      setEmotionDetails(asArray(res.emotionDetails))
-      setActivitySeries(asArray(res.activitySeries))
-      setActivityAbilityList(
-        normalizeActivityAbilityList(res.activityAbilityList),
-      )
-      setActivityDetails(asArray(res.activityDetails))
+      if (!res) {
+        throw new Error('대시보드 데이터를 불러오지 못했습니다.')
+      }
 
-      const qStudent =
-        students.find(s => s.id === studentId) || selectedStudent || null
-      setQueriedStudent(qStudent)
-      setQueriedStartDate(startDate)
-      setQueriedEndDate(endDate)
+      // 1) 요약 지표 (총 기록 수, 평균 점수 등)
+      //    Supabase 집계 결과를 그대로 쓰되, 없으면 데모/기본값 사용
+      setMetrics(res.metrics ?? demoMetrics)
+
+      // 2) 감정 분포 (예: [{ name: '기쁜', value: 9.5, count: 3 }, ...])
+      setEmotionData(res.emotionDistribution ?? demoEmotion)
+
+      // 3) 활동 시간 시계열 (예: [{ date: '2025-10-20', minutes: 60 }, ...])
+      setActivitySeries(res.activitySeries ?? demoActivitySeries)
+
+      // 4) 활동별 능력/분석 카드 리스트
+      //    백엔드에서 적당히 필드 이름을 맞춰주고, 여기서 프론트용으로 살짝 다시 정제
+      if (Array.isArray(res.activityAbilityList)) {
+        setActivityAbilityList(
+          res.activityAbilityList.map(item => ({
+            id: item.id,
+            activity: item.activity,                 // 활동명
+            date: item.date_label ?? item.date,      // 표시용 날짜
+            levelType: item.level_type,             // 'excellent' | 'good' | 'need_support' 등
+            levelLabel: item.level_label,           // '매우 좋음' 등 한글 라벨
+            difficultyRatio: item.difficulty_ratio, // 난이도 비율
+            normalRatio: item.normal_ratio,         // 보통 비율
+            goodRatio: item.good_ratio,             // 우수 비율
+            totalScore: item.total_score,           // 총점/지수
+            hours: item.hours_label,                // '1시간 30분' 같은 문자열
+            mainSkills: item.main_skills ?? [],     // ['주의집중', '협동'] 같은 칩용 배열
+          })),
+        )
+      } else {
+        setActivityAbilityList(demoActivityAbilityList)
+      }
+
+      // Preserve existing logic for other states
+      if (res.emotionDetails) setEmotionDetails(res.emotionDetails)
+      if (res.activityDetails) setActivityDetails(res.activityDetails)
+      
+      const qStudent = students.find(s => s.id === studentId) || selectedStudent || null
+      if (typeof setQueriedStudent === 'function') setQueriedStudent(qStudent)
+      if (typeof setQueriedStartDate === 'function') setQueriedStartDate(from)
+      if (typeof setQueriedEndDate === 'function') setQueriedEndDate(to)
 
       // 첫 조회 시 채팅 인트로 메시지 없으면 생성
       if (!chatMessages.length && qStudent) {
@@ -386,27 +433,33 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ---------- 이벤트 핸들러 ----------
+  // 학생이 선택되면, 해당 학생 기준으로 기본 대시보드 조회
+  useEffect(() => {
+    if (!selectedStudentId) return
 
+    fetchDashboardData({
+      studentId: selectedStudentId,
+      from: startDate || undefined,
+      to: endDate || undefined,
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedStudentId])
+
+  // 검색 버튼
   function handleSearch(e) {
     e.preventDefault()
-    if (!selectedStudentId) {
-      alert('학생을 선택해 주세요.')
-      return
-    }
-    if (!startDate || !endDate) {
-      alert('시작일과 종료일을 모두 선택해 주세요.')
-      return
-    }
+    if (!selectedStudentId) return
+
+    // 🔹 기간 검증: 시작일이 종료일보다 늦으면 막기
     if (isInvalidRange) {
-      alert('시작일이 종료일보다 늦을 수 없습니다. 기간을 다시 선택해 주세요.')
+      alert('시작일이 종료일보다 늦을 수 없습니다.')
       return
     }
 
     fetchDashboardData({
       studentId: selectedStudentId,
-      startDate,
-      endDate,
+      from: startDate || undefined,
+      to: endDate || undefined,
     })
   }
 

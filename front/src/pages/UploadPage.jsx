@@ -243,9 +243,7 @@ function hydrateUpload(raw) {
     String(raw.file_name || raw.filename || raw.name || Math.random())
 
   const fileName = raw.file_name || raw.filename || raw.name
-
-  const studentName =
-    raw.student_name || raw.student?.name || raw.meta?.student_name
+  const studentName = raw.student_name || raw.student?.name || raw.meta?.student_name
 
   const uploaderName =
     raw.uploader_name ||
@@ -258,23 +256,31 @@ function hydrateUpload(raw) {
     raw.created_at || raw.uploaded_at || raw.uploadDate || raw.createdAt || null
 
   const status = raw.status || 'queued'
-  const progress =
-    typeof raw.progress === 'number' ? raw.progress : raw.overall_progress
+  const isSuccess = status === 'success' || status === 'completed' || status === 'done'
+
+  let progress = typeof raw.progress === 'number' ? raw.progress : raw.overall_progress
+  if (isSuccess) progress = 100
 
   let steps = raw.steps
   if (!steps) {
-    const base = typeof progress === 'number' ? progress : 0
-    steps = {
-      upload: base,
-      // 업로드 카드가 생성되는 시점에는 텍스트 추출이 끝난 것으로 간주
-      extract: 100,
-      ocr: base,
-      sentiment: base,
+    // DB 상태 기반 스텝 초기화
+    if (isSuccess) {
+      steps = { upload: 100, extract: 100, ocr: 100, sentiment: 100, ai: 100, save: 100 }
+    } else {
+      const base = typeof progress === 'number' ? progress : 0
+      steps = {
+        upload: base,
+        // status가 processing 이상이면 추출은 끝난 것으로 간주
+        extract: (status === 'processing' || base > 0) ? 100 : base,
+        ocr: base,
+        sentiment: base,
+      }
     }
   }
 
-  const overall =
-    typeof progress === 'number'
+  const overall = isSuccess 
+    ? 100 
+    : typeof progress === 'number'
       ? progress
       : Math.round((steps.upload + steps.extract + steps.ocr + steps.sentiment) / 4)
 
@@ -488,6 +494,7 @@ export default function UploadPage() {
   // Gemini AI 관련 상태
   const [aiLoading, setAiLoading] = useState(false)
   const [aiError, setAiError] = useState('')
+  const [aiRunningUploadId, setAiRunningUploadId] = useState(null)
 
   // 🔹 날짜 탭 선택 (이제 컴포넌트 내부에서 setDetail 사용)
   const handleSelectDate = dateStr => {
@@ -629,14 +636,11 @@ export default function UploadPage() {
     detail.autoAiRequested,
   ])
 
-  // ---------- 파일 업로드 ----------
+// ---------- 파일 업로드 ----------
 
   async function handleFiles(files) {
-    // 파일 배열로 변환
     const list = Array.from(files || [])
     if (list.length === 0) return
-
-    // 이미 업로드/변환이 진행 중이면 중복 실행 방지
     if (uploading) return
 
     setError('')
@@ -647,7 +651,6 @@ export default function UploadPage() {
         const form = new FormData()
         form.append('file', file)
 
-        // 추가: 로그인 사용자 정보를 함께 전송해 ingest_uploads.uploaded_by 에 기록
         try {
           const rawUser = localStorage.getItem('user')
           if (rawUser) {
@@ -657,7 +660,7 @@ export default function UploadPage() {
             }
           }
         } catch {
-          // user 정보 파싱 실패해도 업로드는 진행
+          // user 정보 파싱 실패 무시
         }
 
         try {
@@ -667,22 +670,6 @@ export default function UploadPage() {
             body: form,
             _formName: file.name,
           })
-          // 업로드가 완료된 뒤에만 목록을 갱신해서 카드가 생성되도록
-          await fetchUploads()
-
-          // 🔹 목록 갱신 후, 가장 최근 업로드 카드의 상세 편집 + AI 분석 자동 시작
-          const all = Array.isArray(uploadsCache) ? uploadsCache : []
-          if (all.length > 0) {
-            const sorted = [...all].sort((a, b) => {
-              const ad = new Date(a.uploaded_at || a.created_at || 0).getTime()
-              const bd = new Date(b.uploaded_at || b.created_at || 0).getTime()
-              return bd - ad
-            })
-            const newest = sorted[0]
-            if (newest) {
-              openDetail(newest)
-            }
-          }
         } catch (e) {
           console.error(e)
           setError('파일 업로드 중 오류가 발생했습니다.')
@@ -690,8 +677,29 @@ export default function UploadPage() {
           setLoading(false)
         }
       }
+
+      // 모든 파일 루프가 끝난 뒤 목록 갱신 및 자동 열기
+      await fetchUploads()
+
+      const all = uploadsCache || [] // fetchUploads가 갱신한 캐시 사용
+      if (all.length > 0) {
+        // 시간순 정렬 (최신순)
+        const sorted = [...all].sort((a, b) => {
+          const ad = new Date(a.uploaded_at || a.created_at || 0).getTime()
+          const bd = new Date(b.uploaded_at || b.created_at || 0).getTime()
+          return bd - ad
+        })
+        const newest = sorted[0]
+        if (newest) {
+          openDetail(newest)
+        }
+      }
+
     } finally {
       setUploading(false)
+      if (fileRef.current) {
+        fileRef.current.value = ''
+      }
     }
   }
 
@@ -985,6 +993,15 @@ export default function UploadPage() {
   }
 
   function closeDetail() {
+    // [수정] 작업 중 닫기 방지/경고
+    if (detail.saving || aiLoading) {
+      const proceed = window.confirm(
+        '현재 작업(AI 분석 또는 저장)이 진행 중입니다. 창을 닫으면 작업이 중단되거나 데이터가 저장되지 않을 수 있습니다. 정말 닫으시겠습니까?'
+      )
+      if (!proceed) return
+    } else if (!detail.saved && (detail.editedText || (detail.students && detail.students.length > 0))) {
+        // (선택 사항) 저장되지 않은 변경사항이 있을 때 경고하고 싶다면 여기에 추가
+    }
     setAiError('')
     setStudentPickerOpen(false)
     setStudentPickerValue('')
@@ -1123,6 +1140,13 @@ export default function UploadPage() {
   }
 
   function handleRemoveStudent(studentId) {
+    // [수정] 삭제 확인 Confirm 추가
+    const target = detail.students.find(s => s.id === studentId)
+    const name = target ? target.name : '학생'
+    if (!window.confirm(`'${name}' 학생의 분석 데이터를 삭제하시겠습니까?`)) {
+        return
+    }
+
     setDetail(prev => {
       const nextStudents = (prev.students || []).filter(
         s => s.id !== studentId,
@@ -1316,144 +1340,190 @@ export default function UploadPage() {
     }
   }
 
-  // ---------- Gemini AI: 텍스트 → 활동 레코드 자동 구조화 ----------
+// ---------- Gemini AI: 텍스트 → 활동 레코드 자동 구조화 ----------
 
   function applyAiExtraction(records) {
-    if (!Array.isArray(records) || records.length === 0) return
+    if (!Array.isArray(records)) return
 
     setDetail(prev => {
-      if (!prev.upload) return prev
+      // 1) 기존 상태 복사
+      const prevStudents = prev.students || []
+      const prevAnalysisByStudent = prev.analysisByStudent || {}
+      const studentsByName = new Map(prevStudents.map(stu => [stu.name, stu]))
 
-      let students = [...(prev.students || [])]
-      const analysisByStudent = { ...(prev.analysisByStudent || {}) }
+      const nextStudents = [...prevStudents]
+      const nextAnalysisByStudent = { ...prevAnalysisByStudent }
 
-      // Supabase 학생 목록(studentsMaster)과 이름 매칭 → 있으면 해당 id 사용
-      function ensureStudentId(name) {
-        const trimmed = String(name || '').trim()
-        const displayName = trimmed || '학생'
+      // 2) 날짜 탭 자동 생성을 위한 Set (AI가 찾은 날짜 수집)
+      // [수정] 긴 코드에 없던 기능: AI가 찾은 날짜를 탭으로 만듦
+      const foundDates = new Set(prev.dates || [])
 
-        // 1) Supabase 학생 이름과 매칭
-        let master = null
-        if (studentsMaster && studentsMaster.length > 0 && trimmed) {
-          master = studentsMaster.find(
-            s => (s.name || '').trim() === trimmed,
+      records.forEach((rec, idx) => {
+        if (!rec) return
+
+        // Step 1: 날짜 처리
+        if (rec.date) {
+          foundDates.add(rec.date)
+        }
+
+        // Step 2: 학생 처리
+        const name = (rec.student_name && String(rec.student_name).trim()) || `학생 ${idx + 1}`
+        
+        let student = studentsByName.get(name)
+        if (!student) {
+          student = {
+            id: `ai-${Date.now()}-${idx + 1}`,
+            name,
+          }
+          studentsByName.set(name, student)
+          nextStudents.push(student)
+        }
+
+        const prevState = nextAnalysisByStudent[student.id] || {
+          analysis: {},
+          activityTypes: buildActivityTypeState(),
+        }
+
+        // Step 3: 활동별 감정 추출 (배열/객체/문자열 모두 대응)
+        const emotionItems = Array.isArray(rec.emotions) 
+          ? rec.emotions 
+          : Array.isArray(rec.emotion_tags) 
+            ? rec.emotion_tags 
+            : []
+        
+        const emotionTags = emotionItems.map(e => {
+            if (typeof e === 'string') return e;
+            return e?.label || e?.name || e?.tag || '';
+        }).filter(Boolean);
+        
+        const mainEmotion = emotionTags[0] || '';
+
+        // Step 4: 활동 유형 자동 체크
+        let activityTypes = prevState.activityTypes || buildActivityTypeState()
+        if (rec.activity_type) {
+          const key = Object.keys(ACTIVITY_TYPE_PRESETS).find(
+            k => ACTIVITY_TYPE_PRESETS[k].label === rec.activity_type || rec.activity_type.includes(ACTIVITY_TYPE_PRESETS[k].label)
           )
-        }
-
-        if (master) {
-          const masterId = String(master.id)
-          const byId = students.find(s => String(s.id) === masterId)
-          if (byId) return byId.id
-
-          const stuObj = { id: masterId, name: master.name || displayName }
-          students = [...students, stuObj]
-          return masterId
-        }
-
-        // 2) 현재 모달 안에서 이름이 같은 학생이 이미 있으면 재사용
-        const existingByName = students.find(s => s.name === displayName)
-        if (existingByName) return existingByName.id
-
-        // 3) 둘 다 없으면 로컬 가상 학생 생성
-        const newId = `ai-${students.length + 1}-${Date.now()}`
-        const newStu = { id: newId, name: displayName }
-        students = [...students, newStu]
-        return newId
-      }
-
-      records.forEach(rec => {
-        const studentName =
-          rec.student_name || prev.upload.student_name || '학생'
-
-        const stuId = ensureStudentId(studentName)
-
-        const firstEmotion = Array.isArray(rec.emotions)
-          ? rec.emotions[0]
-          : null
-
-        const emotionTags = Array.isArray(rec.emotions)
-          ? rec.emotions.map(e => e && e.label).filter(Boolean)
-          : []
-
-        const abilityAnalysis = rec.ability_analysis || {}
-
-        let activityTypes = buildActivityTypeState()
-        const actTypeText = rec.activity_type || ''
-
-        Object.entries(ACTIVITY_TYPE_PRESETS).forEach(([key, cfg]) => {
-          if (actTypeText.includes(cfg.label)) {
-            activityTypes[key] = {
-              ...cfg,
-              selected: true,
-              detail: '',
+          if (key) {
+            activityTypes = {
+              ...activityTypes,
+              [key]: {
+                ...ACTIVITY_TYPE_PRESETS[key],
+                selected: true,
+                // [보존] 긴 코드의 장점: teacher_notes도 detail에 넣어줌
+                detail: rec.teacher_notes || rec.raw_activity_text || '', 
+              },
             }
           }
-        })
-
-        const analysis = {
-          date: rec.date || prev.upload.uploaded_at || null,
-          activityName: rec.activity_title || '',
-          activityType: actTypeText || '',
-          durationMinutes: null,
-          note: rec.teacher_comment || '',
-          level: abilityAnalysis.level || '',
-          ability: Array.isArray(abilityAnalysis.main_abilities)
-            ? abilityAnalysis.main_abilities
-            : [],
-          score: null,
-          scoreExplanation: '',
-          emotionSummary: firstEmotion?.label || '',
-          emotionCause: firstEmotion?.reason || '',
-          observedBehaviors: Array.isArray(rec.behavior_tags)
-            ? rec.behavior_tags.join(', ')
-            : '',
-          emotionTags,
-          rawTextCleaned:
-            prev.editedText ||
-            prev.upload.raw_text ||
-            prev.upload.analysis?.rawTextCleaned ||
-            '',
-          isAiGenerated: true,
         }
 
-        analysisByStudent[stuId] = {
-          analysis,
-          activityTypes,
+        // Step 5: 시간(분) 추출 - [보존] 긴 코드의 꼼꼼한 체크 로직을 한 줄로 통합
+        // minutes, duration_minutes, ability_analysis.total_minutes 순서로 체크
+        const minutes = 
+            (typeof rec.minutes === 'number' ? rec.minutes : null) ??
+            (typeof rec.duration_minutes === 'number' ? rec.duration_minutes : null) ??
+            (rec.ability_analysis && typeof rec.ability_analysis.total_minutes === 'number' ? rec.ability_analysis.total_minutes : 0);
+
+        // Step 6: 특이사항(Note) 추출 - [보존] 여러 필드 후보군 모두 체크
+        const noteText = 
+            rec.teacher_comment || 
+            rec.teacher_notes || 
+            rec.raw_activity_text || 
+            prevState.analysis?.note || 
+            '';
+
+        // Step 7: 최종 상태 매핑
+        nextAnalysisByStudent[student.id] = {
+          analysis: {
+            ...(prevState.analysis || {}),
+            isAiGenerated: true,
+            studentName: name,
+            // 날짜가 없으면 기존 선택 날짜 혹은 오늘
+            date: rec.date || prev.activeDate || new Date().toISOString().slice(0, 10),
+            activityName: rec.activity_title || rec.activityName || prevState.analysis?.activityName || '',
+            activityType: rec.activity_type || prevState.analysis?.activityType || '', 
+            durationMinutes: minutes, 
+            note: noteText, 
+            emotionSummary: mainEmotion,
+            emotionTags: emotionTags,
+          },
+          activityTypes, 
         }
       })
 
-      const nextActiveId =
-        prev.activeStudentId || (students[0] && students[0].id) || null
+      // 3) 날짜 탭 정렬 및 업데이트
+      const sortedDates = Array.from(foundDates).sort()
+      let nextActiveDate = prev.activeDate
+      if (!nextActiveDate && sortedDates.length > 0) {
+        nextActiveDate = sortedDates[0]
+      }
+
+      // 4) 학생 선택 (AI가 찾은 첫 번째 학생으로 포커스)
+      let nextActiveStudentId = prev.activeStudentId
+      const hasPrevActive = nextActiveStudentId && nextStudents.some(stu => stu.id === nextActiveStudentId)
+      if (!hasPrevActive) {
+        nextActiveStudentId = nextStudents[0] ? nextStudents[0].id : null
+      }
 
       return {
         ...prev,
-        students,
-        analysisByStudent,
-        activeStudentId: nextActiveId,
+        dates: sortedDates,
+        activeDate: nextActiveDate,
+        students: nextStudents,
+        analysisByStudent: nextAnalysisByStudent,
+        activeStudentId: nextActiveStudentId,
         saved: false,
       }
     })
   }
 
-async function handleRunAiExtraction() {
-  if (!detail.upload || aiLoading) return
+  async function handleRunAiExtraction() {
+    if (!detail.upload || aiLoading) return
 
-  // 🔹 현재 선택된 날짜 기준 텍스트 사용
-  const sourceText = getCurrentRawText(detail)
+    // 1. 현재 선택된 날짜 기준 텍스트 사용
+    const sourceText = getCurrentRawText(detail)
 
-  if (!sourceText) {
-    alert('분석할 텍스트가 없습니다. 먼저 업로드 텍스트를 불러오거나 작성해 주세요.')
-    return
-  }
+    if (!sourceText) {
+      alert('분석할 텍스트가 없습니다. 먼저 업로드 텍스트를 불러오거나 작성해 주세요.')
+      return
+    }
+
+    const currentUploadId = detail.upload.id
 
     try {
       setAiLoading(true)
       setAiError('')
+      setAiRunningUploadId(currentUploadId)
 
+      // 진행률 업데이트: AI 준비 (20%)
+      if (currentUploadId) {
+        updateUploadSteps(currentUploadId, prev => ({
+          ...prev,
+          ai: Math.max(prev.ai || 0, 20),
+        }))
+      }
+
+      // 진행률 업데이트: 데이터 전송 (40%)
+      if (currentUploadId) {
+        updateUploadSteps(currentUploadId, prev => ({
+          ...prev,
+          ai: Math.max(prev.ai || 0, 40),
+        }))
+      }
+
+      // 2. Gemini API 호출
       const res = await extractRecordsWithGemini({
         raw_text: sourceText,
         file_name: detail.upload.file_name,
       })
+
+      // 진행률 업데이트: 결과 정리 중 (70%)
+      if (currentUploadId) {
+        updateUploadSteps(currentUploadId, prev => ({
+          ...prev,
+          ai: Math.max(prev.ai || 0, 70),
+        }))
+      }
 
       const records = res?.parsed?.records || res?.records || []
 
@@ -1462,11 +1532,12 @@ async function handleRunAiExtraction() {
         return
       }
 
+      // 3. 분석 결과 UI 적용 (위의 함수 실행)
       applyAiExtraction(records)
 
-      // AI 자동 분석 완료 → 두 번째 단계 100%
-      if (detail.upload) {
-        updateUploadSteps(detail.upload.id, prevSteps => ({
+      // 진행률 업데이트: 완료 (100%)
+      if (currentUploadId) {
+        updateUploadSteps(currentUploadId, prevSteps => ({
           ...prevSteps,
           ai: 100,
         }))
@@ -1477,6 +1548,80 @@ async function handleRunAiExtraction() {
       alert('AI 분석 중 오류가 발생했습니다.')
     } finally {
       setAiLoading(false)
+      setAiRunningUploadId(null)
+    }
+  }
+
+  async function handleRunAiExtraction() {
+    if (!detail.upload || aiLoading) return
+
+    // 🔹 현재 선택된 날짜 기준 텍스트 사용
+    const sourceText = getCurrentRawText(detail)
+
+    if (!sourceText) {
+      alert('분석할 텍스트가 없습니다. 먼저 업로드 텍스트를 불러오거나 작성해 주세요.')
+      return
+    }
+
+    const currentUploadId = detail.upload.id
+
+    try {
+      setAiLoading(true)
+      setAiError('')
+      setAiRunningUploadId(currentUploadId)
+
+      // 1단계: AI 준비 시작
+      if (currentUploadId) {
+        updateUploadSteps(currentUploadId, prev => ({
+          ...prev,
+          ai: Math.max(prev.ai || 0, 20),
+        }))
+      }
+
+      // 2단계: Gemini API 호출 (데이터 전송)
+      if (currentUploadId) {
+        updateUploadSteps(currentUploadId, prev => ({
+          ...prev,
+          ai: Math.max(prev.ai || 0, 40),
+        }))
+      }
+
+      const res = await extractRecordsWithGemini({
+        raw_text: sourceText,
+        file_name: detail.upload.file_name,
+      })
+
+      // 3단계: AI가 결과를 정리하는 중
+      if (currentUploadId) {
+        updateUploadSteps(currentUploadId, prev => ({
+          ...prev,
+          ai: Math.max(prev.ai || 0, 70),
+        }))
+      }
+
+      const records = res?.parsed?.records || res?.records || []
+
+      if (!Array.isArray(records) || records.length === 0) {
+        alert('AI가 활동 기록을 찾지 못했습니다. 텍스트를 다시 확인해 주세요.')
+        return
+      }
+
+      applyAiExtraction(records)
+
+      // 4단계: AI 자동 분석 완료 → 100%
+      if (currentUploadId) {
+        updateUploadSteps(currentUploadId, prevSteps => ({
+          ...prevSteps,
+          ai: 100,
+        }))
+      }
+    } catch (e) {
+      console.error(e)
+      setAiError('AI 분석 중 오류가 발생했습니다.')
+      alert('AI 분석 중 오류가 발생했습니다.')
+    } finally {
+      setAiLoading(false)
+      setAiRunningUploadId(null)
     }
   }
 
@@ -1528,7 +1673,7 @@ async function handleRunAiExtraction() {
     setActivityDetailModal(INITIAL_ACTIVITY_DETAIL_MODAL)
   }
 
-  // ---------- DB 저장 ----------
+// ---------- DB 저장 ----------
 
   async function handleSaveLogEntry() {
     if (!detail.upload || detail.saving) return
@@ -1551,6 +1696,7 @@ async function handleRunAiExtraction() {
 
     const todayStr = new Date().toISOString().slice(0, 10)
 
+    // 저장할 데이터(payload) 구성
     const logEntries = (detail.students || []).map(stu => {
       const state =
         detail.analysisByStudent?.[stu.id] || {
@@ -1558,8 +1704,7 @@ async function handleRunAiExtraction() {
           activityTypes: buildActivityTypeState(),
         }
       const analysis = state.analysis || {}
-      const activityTypes =
-        state.activityTypes || buildActivityTypeState()
+      const activityTypes = state.activityTypes || buildActivityTypeState()
 
       const selectedActivityLabels = Object.entries(activityTypes)
         .filter(([, item]) => item.selected)
@@ -1583,14 +1728,13 @@ async function handleRunAiExtraction() {
 
       const dateKey = logDate ? String(logDate).slice(0, 10) : null
 
-      // 🔹 날짜 탭이 있으면 해당 날짜 텍스트 사용, 없으면 전체 텍스트 사용
+      // 날짜 탭이 있으면 해당 날짜 텍스트 사용, 없으면 전체 텍스트 사용
       const logContent =
         (hasDateTabs && dateKey && rawByDate[dateKey]) || baseRawText
 
-      // 🔹 대표 감정: emotionSummary > emotionTags[0]
+      // 대표 감정: emotionSummary > emotionTags[0]
       const primaryEmotion =
-        (analysis.emotionSummary &&
-          analysis.emotionSummary.trim()) ||
+        (analysis.emotionSummary && analysis.emotionSummary.trim()) ||
         (emotionTags[0] || '')
 
       const relatedMetrics = {
@@ -1599,16 +1743,10 @@ async function handleRunAiExtraction() {
         activity_type: analysis.activityType || '',
         note: analysis.note || '',
         level: analysis.level || '',
-        ability: Array.isArray(analysis.ability)
-          ? analysis.ability
-          : [],
-        score:
-          typeof analysis.score === 'number'
-            ? analysis.score
-            : null,
+        ability: Array.isArray(analysis.ability) ? analysis.ability : [],
+        score: typeof analysis.score === 'number' ? analysis.score : null,
         score_explanation: analysis.scoreExplanation || '',
         emotionTags,
-        // Dashboard / 상세 재로딩 시 동일한 대표 감정을 사용
         emotionSummary: primaryEmotion || '',
         isAiGenerated: !!analysis.isAiGenerated,
       }
@@ -1617,9 +1755,7 @@ async function handleRunAiExtraction() {
         student_id: stu.id,
         student_name: stu.name,
         log_date: logDate,
-        // Dashboard 집계용 대표 감정
         emotion_tag: primaryEmotion || '',
-        // 전체 감정 배열 (서버에서 metrics[0].emotion_tags 로도 보관)
         emotion_tags: emotionTags,
         activity_tags: selectedActivityLabels,
         log_content: logContent,
@@ -1634,25 +1770,20 @@ async function handleRunAiExtraction() {
       log_entries: logEntries,
     }
 
+    // 실제 API 호출 및 상태 업데이트
     try {
       const uploadId = detail.upload.id
-
       setDetail(prev => ({ ...prev, saving: true }))
 
       await apiFetch(`/uploads/${uploadId}/log`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
 
-      // 저장이 끝났으므로 draft 캐시는 제거 (다음에는 DB 기준으로 열림)
-      if (uploadId && detailDrafts[uploadId]) {
-        delete detailDrafts[uploadId]
-      }
+      if (uploadId && detailDrafts[uploadId]) delete detailDrafts[uploadId]
 
-      // detail 상태 갱신
+      // 현재 상세창 상태 업데이트 (저장됨 표시)
       setDetail(prev => ({
         ...prev,
         saving: false,
@@ -1664,7 +1795,7 @@ async function handleRunAiExtraction() {
         },
       }))
 
-      // 업로드 카드 정보도 갱신
+      // 목록(업로드 현황)의 진행 상태도 100% 완료로 업데이트
       updateUploads(prev =>
         prev.map(item => {
           if (item.id !== uploadId) return item
@@ -1672,17 +1803,8 @@ async function handleRunAiExtraction() {
           return {
             ...item,
             raw_text: baseRawText,
-            student_name:
-              firstEntry?.student_name || item.student_name,
-            analysis: {
-              ...(item.analysis || {}),
-              date: firstEntry?.log_date,
-              emotionSummary: firstEntry?.emotion_tag,
-              activityType:
-                firstEntry?.activity_tags?.[0] ||
-                item.analysis?.activityType,
-            },
-            // 3개 과정(텍스트 추출, AI 분석, DB 저장)이 모두 끝난 상태로 표시
+            student_name: firstEntry?.student_name || item.student_name,
+            // 3개 과정(텍스트 추출, AI 분석, DB 저장) 완료
             status: 'success',
             progress: 100,
             overall_progress: 100,
@@ -1696,10 +1818,14 @@ async function handleRunAiExtraction() {
               save: 100,
             },
           }
-        }),
+        })
       )
 
       alert('데이터가 데이터베이스(log_entries)에 저장되었습니다.')
+      
+      // 목록 최신화
+      await fetchUploads()
+
     } catch (e) {
       console.error(e)
       setDetail(prev => ({ ...prev, saving: false, saved: false }))
@@ -1825,7 +1951,6 @@ async function handleRunAiExtraction() {
               : isDone
               ? 'badge badge-success'
               : 'badge badge-warning'
-            // 3개 과정이 모두 끝나면 '저장완료', 그렇지 않으면 '수정중'
             const statusLabel = isFailed ? '실패' : isDone ? '저장완료' : '수정중'
 
             const shellClass = isFailed
@@ -1843,11 +1968,44 @@ async function handleRunAiExtraction() {
             const allStepsDone =
               stepInfoList.length > 0 && stepInfoList.every(s => (s.value ?? 0) >= 100)
             const firstIncompleteStep = stepInfoList.find(s => (s.value ?? 0) < 100)
-            const displayStepLabel = allStepsDone
-              ? '모든 단계 완료'
-              : firstIncompleteStep
-              ? `${firstIncompleteStep.label} 진행 중`
-              : '대기 중'
+
+            // ✅ 이 업로드에 대해 AI 분석이 돌아가는 중인지
+            const isAiRunningForThisUpload =
+              aiRunningUploadId && aiRunningUploadId === upload.id
+
+            // ✅ 단계별로 재치 있는 문구 표시
+            const displayStepLabel = (() => {
+              if (allStepsDone) return '모든 단계 완료'
+              if (!firstIncompleteStep) return '대기 중'
+
+              if (firstIncompleteStep.key === 'extract') {
+                return '텍스트를 쭉쭉 뽑는 중...'
+              }
+
+              if (firstIncompleteStep.key === 'ai') {
+                const aiValue = firstIncompleteStep.value ?? 0
+
+                if (isAiRunningForThisUpload) {
+                  if (aiValue < 30) return 'AI 준비 중...'
+                  if (aiValue < 70) return '데이터가 꿈틀꿈틀 이동 중...'
+                  if (aiValue < 100) return 'AI가 결과를 정리하는 중...'
+                }
+                return 'AI 자동 분석 대기 중'
+              }
+
+              if (firstIncompleteStep.key === 'save') {
+                if (
+                  detail.upload &&
+                  detail.upload.id === upload.id &&
+                  detail.saving
+                ) {
+                  return '데이터베이스에 저장 중...'
+                }
+                return '데이터베이스 저장 대기 중'
+              }
+
+              return `${firstIncompleteStep.label} 진행 중`
+            })()
 
             const representativeLog =
               upload.latest_log_entry ||
@@ -1902,14 +2060,21 @@ async function handleRunAiExtraction() {
                   </div>
                   <div className="upload-card-shell-actions">
                     <span className={badgeClass}>{statusLabel}</span>
-                    <button
-                      className="btn secondary"
-                      type="button"
-                      onClick={() => openDetail(upload)}
-                      title="상세보기"
-                    >
-                      상세보기
-                    </button>
+                    {isAiRunningForThisUpload ? (
+                      // ✅ AI 분석 중일 때 버튼 대신 텍스트
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        AI 분석 중
+                      </span>
+                    ) : (
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        onClick={() => openDetail(upload)}
+                        title="상세보기"
+                      >
+                        상세보기
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1981,7 +2146,17 @@ async function handleRunAiExtraction() {
 
       {/* 상세보기 모달 */}
       {detail.open && detail.upload && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
+        <div 
+            className="modal-backdrop" 
+            role="dialog" 
+            aria-modal="true"
+            onClick={(e) => {
+                // 배경 클릭 시 닫기 (단, 로딩/저장 중이면 무시)
+                if (e.target === e.currentTarget) {
+                    closeDetail()
+                }
+            }}
+        >
           <div className="modal-card modal-card-wide detail-analysis-modal">
             <div className="detail-analysis-header">
               <div>
@@ -1992,14 +2167,6 @@ async function handleRunAiExtraction() {
                 </p>
               </div>
               <div className="detail-header-actions">
-                {aiLoading && (
-                  <span
-                    className="muted"
-                    style={{ marginRight: 8, fontSize: 12 }}
-                  >
-                    AI가 자동으로 분석 중입니다...
-                  </span>
-                )}
                 <button
                   type="button"
                   className="btn secondary"
@@ -2085,33 +2252,6 @@ async function handleRunAiExtraction() {
                   marginBottom: 12,
                 }}
               >
-                <select
-                  className="analysis-input"
-                  style={{ maxWidth: 260 }}
-                  value={studentPickerValue}
-                  onChange={e => setStudentPickerValue(e.target.value)}
-                >
-                  <option value="">학생 선택</option>
-                  {studentsMaster
-                    .filter(stu => {
-                      const selected = (detail.students || []).some(
-                        s => String(s.id) === String(stu.id),
-                      )
-                      return !selected
-                    })
-                    .map(stu => (
-                      <option key={stu.id} value={stu.id}>
-                        {stu.name}
-                      </option>
-                    ))}
-                </select>
-                <button
-                  type="button"
-                  className="btn secondary small"
-                  onClick={handleAddStudentFromPicker}
-                >
-                  추가
-                </button>
               </div>
             )}
 
@@ -2163,7 +2303,7 @@ async function handleRunAiExtraction() {
                     </div>
                   </section>
 
-                  <section className="detail-right">
+<section className="detail-right">
                     {(() => {
                       const { activeId, analysis: a, activityTypes } =
                         getActiveStudentState(detail)
@@ -2173,11 +2313,13 @@ async function handleRunAiExtraction() {
                       const studentsText =
                         activeStudent?.name || detail.upload.student_name
 
+                      // 날짜 값 (없으면 업로드 날짜)
                       const dateValue = a.date
                         ? formatDate(a.date)
                         : formatDate(detail.upload.uploaded_at) || ''
 
-                      const { hours, minutes } = splitDuration(a.durationMinutes)
+                      // 시간 값 (기본값 0)
+                      const { hours, minutes } = splitDuration(a.durationMinutes || 0)
                       const safeHours = Number.isNaN(hours) ? 0 : hours
                       const safeMinutes = Number.isNaN(minutes) ? 0 : minutes
 
@@ -2186,317 +2328,153 @@ async function handleRunAiExtraction() {
                           <div className="analysis-panel-header">
                             <h4>AI 분석 결과 (학생별 편집)</h4>
                             <p className="card-subtitle">
-                              현재 선택된 학생 탭에 대해 활동 정보와 감정, 활동 유형을
-                              개별적으로 수정할 수 있습니다.
+                              선택된 학생의 활동 정보, 특이사항, 감정을 수정합니다.
                             </p>
                           </div>
 
-                          {/* 🔹 학생 태그 & 학생 추가 */}
-                          <div
-                            className="student-tabs-row"
-                            style={{
-                              display: 'flex',
-                              justifyContent: 'space-between',
-                              alignItems: 'center',
-                              gap: 12,
-                              marginBottom: 8,
-                            }}
-                          >
-                            <div
-                              className="student-tabs"
-                              style={{
-                                display: 'flex',
-                                flexWrap: 'wrap',
-                                gap: 8,
-                             }}
-                            >
-                              {(detail.students || []).map(stu => {
-                                const isActive = stu.id === detail.activeStudentId
-                                const baseClass = 'emotion-chip'
-                                const activeClass = isActive
-                                  ? 'emotion-chip-selected'
-                                  : 'emotion-chip-unselected'
-                                return (
-                                  <button
-                                    key={stu.id}
-                                    type="button"
-                                    className={`${baseClass} ${activeClass} student-tab`}
-                                    onClick={() => handleSelectStudent(stu.id)}
-                                  >
-                                    <span className="emotion-chip-label">{stu.name}</span>
-                                    <span
-                                      className="emotion-chip-icon"
-                                      style={{ marginLeft: 4 }}
-                                      onClick={e => {
-                                        e.stopPropagation()
-                                        handleRemoveStudent(stu.id)
-                                      }}
+                          {/* 🔹 학생 탭 리스트 */}
+                          <div className="student-tabs-row" style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+                             <div className="student-tabs" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                {(detail.students || []).map(stu => {
+                                  const isActive = stu.id === detail.activeStudentId
+                                  return (
+                                    <button
+                                      key={stu.id}
+                                      type="button"
+                                      className={`emotion-chip ${isActive ? 'emotion-chip-selected' : 'emotion-chip-unselected'} student-tab`}
+                                      onClick={() => handleSelectStudent(stu.id)}
                                     >
-                                      ×
-                                    </span>
-                                  </button>
-                                )
-                              })}
-                              {(!detail.students || detail.students.length === 0) && (
-                                <span className="muted" style={{ fontSize: 12 }}>
-                                  아직 등록된 학생이 없습니다.
-                                </span>
-                              )}
-                            </div>
-                            <button
-                              type="button"
-                              className="btn ghost small"
-                              onClick={handleAddStudent}
-                            >
-                              + 학생 추가
-                            </button>
+                                      <span className="emotion-chip-label">{stu.name}</span>
+                                      <span className="emotion-chip-icon" style={{ marginLeft: 4 }} onClick={e => { e.stopPropagation(); handleRemoveStudent(stu.id); }}>×</span>
+                                    </button>
+                                  )
+                                })}
+                                {(!detail.students || detail.students.length === 0) && (
+                                   <span className="muted" style={{ fontSize: 12 }}>학생 없음</span>
+                                )}
+                             </div>
+                             <button type="button" className="btn ghost small" onClick={handleAddStudent}>+ 학생 추가</button>
                           </div>
-
-                          {/* 🔹 Supabase 학생 선택 드롭다운 (학생 추가 버튼 바로 아래) */}
+                          
+                          {/* 🔹 학생 선택 드롭다운 (Supabase 연동) */}
                           {studentPickerOpen && (
-                            <div
-                              className="student-picker-row"
-                              style={{
-                                display: 'flex',
-                                justifyContent: 'flex-end',
-                                alignItems: 'center',
-                                gap: 8,
-                                marginBottom: 12,
-                              }}
-                            >
-                              <select
-                                className="analysis-input"
-                                style={{ maxWidth: 260 }}
-                                value={studentPickerValue}
-                                onChange={e => setStudentPickerValue(e.target.value)}
-                              >
-                               <option value="">학생 선택</option>
-                                {studentsMaster
-                                  .filter(stu => {
-                                    const selected = (detail.students || []).some(
-                                      s => String(s.id) === String(stu.id),
-                                    )
-                                    // 🔹 이미 태그된 학생은 제외
-                                    return !selected
-                                  })
-                                  .map(stu => (
-                                    <option key={stu.id} value={stu.id}>
-                                      {stu.name}
-                                    </option>
-                                  ))}
-                              </select>
-                              <button
-                                type="button"
-                                className="btn secondary small"
-                                onClick={handleAddStudentFromPicker}
-                              >
-                                추가
-                              </button>
-                            </div>
+                             <div className="student-picker-row" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 12 }}>
+                               <select className="analysis-input" style={{ maxWidth: 260 }} value={studentPickerValue} onChange={e => setStudentPickerValue(e.target.value)}>
+                                 <option value="">학생 선택</option>
+                                 {studentsMaster.filter(stu => !(detail.students || []).some(s => String(s.id) === String(stu.id))).map(stu => (
+                                   <option key={stu.id} value={stu.id}>{stu.name}</option>
+                                 ))}
+                               </select>
+                               <button type="button" className="btn secondary small" onClick={handleAddStudentFromPicker}>추가</button>
+                             </div>
                           )}
+
                           <div className="analysis-scroll-panel">
+                            
+                            {/* 1. 특이사항 (가장 중요하므로 최상단 배치) */}
                             <div className="analysis-section">
                               <div className="analysis-section-head">
-                                <div
-                                  style={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: 8,
-                                  }}
-                                >
-                                  <h5>활동 기본 정보</h5>
-                                  {a.isAiGenerated && (
-                                    <span className="badge badge-warning">AI</span>
-                                  )}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                  <h5>특이사항 (Special Matters)</h5>
+                                  {a.isAiGenerated && <span className="badge badge-warning">AI</span>}
                                 </div>
                               </div>
+                              
                               <div className="analysis-grid">
-                                <label>학생</label>
-                                <div className="analysis-input-static">
-                                  {studentsText || '-'}
-                                </div>
-                                <label>활동일</label>
-                                <input
-                                  type="date"
+                                <label>내용</label>
+                                <textarea
                                   className="analysis-input"
-                                  value={dateValue}
-                                  onChange={e =>
-                                    updateEditedAnalysis({
-                                      date: e.target.value || null,
-                                    })
-                                  }
+                                  style={{ minHeight: '80px', resize: 'vertical' }}
+                                  value={a.note || ''}
+                                  placeholder="활동에 대한 특이사항이나 교사 코멘트를 입력하세요."
+                                  onChange={e => updateEditedAnalysis({ note: e.target.value })}
                                 />
+
+                                {/* 메타 정보: 활동명, 날짜, 시간 */}
                                 <label>활동명</label>
                                 <input
                                   type="text"
                                   className="analysis-input"
                                   value={a.activityName || ''}
-                                  onChange={e =>
-                                    updateEditedAnalysis({
-                                      activityName: e.target.value,
-                                    })
-                                  }
+                                  placeholder="예: 토마토 수확하기"
+                                  onChange={e => updateEditedAnalysis({ activityName: e.target.value })}
                                 />
-                                <label>소요 시간</label>
-                                <div className="time-input-group">
+
+                                <label>활동일/시간</label>
+                                <div style={{ display: 'flex', gap: 8 }}>
                                   <input
-                                    type="number"
-                                    min="0"
-                                    className="analysis-input time-input"
-                                    value={safeHours}
-                                    onChange={e => {
-                                      const h = Math.max(
-                                        0,
-                                        Number(e.target.value || 0),
-                                      )
-                                      updateEditedAnalysis({
-                                        durationMinutes: h * 60 + safeMinutes,
-                                      })
-                                    }}
+                                    type="date"
+                                    className="analysis-input"
+                                    style={{ flex: 1 }}
+                                    value={dateValue}
+                                    onChange={e => updateEditedAnalysis({ date: e.target.value || null })}
                                   />
-                                  <span className="time-separator">시간</span>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    max="59"
-                                    className="analysis-input time-input"
-                                    value={safeMinutes}
-                                    onChange={e => {
-                                      let m = Math.max(
-                                        0,
-                                        Number(e.target.value || 0),
-                                      )
-                                      if (m > 59) m = 59
-                                      updateEditedAnalysis({
-                                        durationMinutes: safeHours * 60 + m,
-                                      })
-                                    }}
-                                  />
-                                  <span className="time-separator">분</span>
+                                  <div className="time-input-group" style={{ flex: 1 }}>
+                                    <input
+                                      type="number" min="0"
+                                      className="analysis-input time-input"
+                                      value={safeHours}
+                                      onChange={e => updateEditedAnalysis({ durationMinutes: Number(e.target.value) * 60 + safeMinutes })}
+                                    />
+                                    <span className="time-separator">시간</span>
+                                    <input
+                                      type="number" min="0" max="59"
+                                      className="analysis-input time-input"
+                                      value={safeMinutes}
+                                      onChange={e => updateEditedAnalysis({ durationMinutes: safeHours * 60 + Number(e.target.value) })}
+                                    />
+                                    <span className="time-separator">분</span>
+                                  </div>
                                 </div>
-                                <label>활동 유형</label>
-                                <input
-                                  type="text"
-                                  className="analysis-input"
-                                  value={a.activityType || ''}
-                                  onChange={e =>
-                                    updateEditedAnalysis({
-                                      activityType: e.target.value,
-                                    })
-                                  }
-                                />
-                                <label>특이사항</label>
-                                <input
-                                  type="text"
-                                  className="analysis-input"
-                                  value={a.note || ''}
-                                  onChange={e =>
-                                    updateEditedAnalysis({
-                                      note: e.target.value,
-                                    })
-                                  }
-                                />
                               </div>
                             </div>
 
+                            {/* 2. 활동 유형 선택 */}
                             <div className="analysis-section">
                               <div className="analysis-section-head">
                                 <div>
-                                  <div
-                                    style={{
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: 8,
-                                    }}
-                                  >
-                                    <h5>감정 키워드</h5>
-                                    {a.isAiGenerated && (
-                                      <span className="badge badge-warning">AI</span>
-                                    )}
-                                  </div>
+                                  <h5>활동 유형 및 감정 선택</h5>
                                   <p className="section-helper">
-                                    현재 학생에 해당하는 감정 키워드를 선택하거나 직접
-                                    추가할 수 있습니다. 저장 시 분석/리포트에 활용됩니다.
-                                  </p>
-                                </div>
-                              </div>
-                              <EmotionKeywordSelector
-                                masterList={emotionKeywords}
-                                selected={a.emotionTags || []}
-                                onToggle={label => toggleEmotionTagInDetail(label)}
-                                onAddNew={label =>
-                                  addEmotionKeywordInSupabase(label)
-                                }
-                              />
-                            </div>
-
-                            <div className="analysis-section">
-                              <div className="analysis-section-head">
-                                <div>
-                                  <div
-                                    style={{
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: 8,
-                                    }}
-                                  >
-                                    <h5>활동 유형 선택 (중복 선택 가능)</h5>
-                                    {a.isAiGenerated && (
-                                      <span className="badge badge-warning">AI</span>
-                                    )}
-                                  </div>
-                                  <p className="section-helper">
-                                    체크된 활동 유형은 현재 학생의 활동 기록 통계에
-                                    반영됩니다.
+                                    유형을 선택하면 해당 활동의 감정 키워드가 함께 분석됩니다.
                                   </p>
                                 </div>
                               </div>
                               <div className="activity-type-grid">
-                                {Object.entries(activityTypes || {}).map(
-                                  ([key, item]) => (
-                                    <div
-                                      key={key}
-                                      className={
-                                        item.selected
-                                          ? 'activity-type-card selected'
-                                          : 'activity-type-card'
-                                      }
-                                    >
-                                      <button
-                                        type="button"
-                                        className="activity-type-toggle"
-                                        onClick={() =>
-                                          toggleActivityTypeSelection(key)
-                                        }
-                                      >
-                                        <span className="activity-type-icon">
-                                          {item.icon || '•'}
-                                        </span>
-                                        <span className="activity-type-label">
-                                          {item.label}
-                                        </span>
-                                        <span className="activity-type-check">
-                                          {item.selected ? '✓' : ''}
-                                        </span>
-                                      </button>
-                                      {item.selected && (
-                                        <textarea
-                                          className="activity-type-detail"
-                                          value={item.detail || ''}
-                                          placeholder={item.placeholder}
-                                          onChange={e =>
-                                            updateActivityTypeDetail(
-                                              key,
-                                              e.target.value,
-                                            )
-                                          }
-                                        />
-                                      )}
-                                    </div>
-                                  ),
-                                )}
+                                {Object.entries(activityTypes || {}).map(([key, item]) => (
+                                  <div key={key} className={item.selected ? 'activity-type-card selected' : 'activity-type-card'}>
+                                    <button type="button" className="activity-type-toggle" onClick={() => toggleActivityTypeSelection(key)}>
+                                      <span className="activity-type-icon">{item.icon || '•'}</span>
+                                      <span className="activity-type-label">{item.label}</span>
+                                      <span className="activity-type-check">{item.selected ? '✓' : ''}</span>
+                                    </button>
+                                    {item.selected && (
+                                      <div style={{ marginTop: 8 }}>
+                                          <textarea
+                                            className="activity-type-detail"
+                                            value={item.detail || ''}
+                                            placeholder={`${item.label} 관련 상세 내용`}
+                                            onChange={e => updateActivityTypeDetail(key, e.target.value)}
+                                          />
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
                               </div>
                             </div>
+
+                            {/* 3. 전체 감정 키워드 */}
+                            <div className="analysis-section">
+                               <div className="analysis-section-head">
+                                 <h5>전체 감정 키워드</h5>
+                               </div>
+                               <EmotionKeywordSelector
+                                 masterList={emotionKeywords}
+                                 selected={a.emotionTags || []}
+                                 onToggle={label => toggleEmotionTagInDetail(label)}
+                                 onAddNew={label => addEmotionKeywordInSupabase(label)}
+                               />
+                            </div>
+
                           </div>
                         </div>
                       )

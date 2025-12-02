@@ -40,6 +40,62 @@ function parseJsonFromText(text) {
   }
 }
 
+// -------------------- 업로드 자동 AI 분석 헬퍼 --------------------
+
+// ingest_uploads 한 건에 대해 Gemini로 records 추출만 수행하는 유틸
+async function runAutoExtractionForUpload(uploadRow, rawText) {
+  if (!gemini) {
+    console.warn('Gemini 미설정: 자동 AI 분석을 건너뜁니다.')
+    return
+  }
+  if (!rawText || typeof rawText !== 'string') {
+    console.warn('raw_text 없음: 자동 AI 분석을 건너뜁니다.')
+    return
+  }
+
+  try {
+    const modelName =
+      process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-flash'
+
+    const model = gemini.getGenerativeModel({
+      model: modelName,
+      generationConfig: {
+        responseMimeType: 'application/json',
+      },
+    })
+
+    const input = {
+      raw_text: rawText,
+      file_name: uploadRow.file_name || null,
+    }
+
+    const prompt =
+      PDF_TXT_EXTRACTION_PROMPT +
+      '\n\n[입력 JSON]\n' +
+      JSON.stringify(input)
+
+    const result = await model.generateContent(prompt)
+    const raw = result.response.text()
+    const parsed = parseJsonFromText(raw)
+
+    const records = parsed && Array.isArray(parsed.records)
+      ? parsed.records
+      : []
+
+    console.log(
+      `[AUTO AI] 업로드 ${uploadRow.id} (${uploadRow.file_name}) 분석 완료, records: ${records.length}개`,
+    )
+
+    // 필요하면 여기서 records 를 log_entries 행으로 변환해
+    // /uploads/:id/log 의 로직을 참고하여 DB에 바로 저장할 수도 있음.
+  } catch (e) {
+    console.error(
+      `[AUTO AI] 업로드 ${uploadRow.id} 자동 분석 중 오류:`,
+      e,
+    )
+  }
+}
+
 // 업로드된 파일에서 순수 텍스트만 추출하는 유틸
 async function extractPlainTextFromFile(file) {
   if (!file) return null
@@ -230,7 +286,7 @@ app.post(
         null
 
       // 1) ingest_uploads 에 메타데이터 저장
-      const { data, error } = await supabase
+const { data, error } = await supabase
         .from('ingest_uploads')
         .insert([
           {
@@ -238,7 +294,7 @@ app.post(
             storage_key: storageKey,
             student_id: null,
             uploaded_by: uploadedBy,
-            status: 'queued',
+            status: 'queued', // 초기 상태
             progress: 0,
             error: null,
             created_at: now,
@@ -263,27 +319,38 @@ app.post(
       }
 
       // 3) 추출된 텍스트가 있으면 ingest_uploads.raw_text 에 저장
-      if (rawText) {
+if (rawText) {
         try {
           const { error: upErr } = await supabase
             .from('ingest_uploads')
             .update({
               raw_text: rawText,
+              // [수정] 텍스트가 나왔으므로 '처리중' 상태로 변경하여 프론트엔드와 동기화
+              status: 'processing', 
+              progress: 50, 
               updated_at: new Date().toISOString(),
             })
             .eq('id', data.id)
 
           if (upErr) {
-            console.error('ingest_uploads raw_text 업데이트 에러:', upErr)
+            console.error('ingest_uploads update 에러:', upErr)
           } else {
-            // 프론트에서 바로 사용할 수 있도록 응답 객체에도 포함
             data.raw_text = rawText
+            data.status = 'processing' // 응답 데이터도 갱신
+            data.progress = 50
           }
         } catch (e) {
-          console.error('ingest_uploads raw_text 업데이트 예외:', e)
+          console.error('ingest_uploads update 예외:', e)
         }
-      }
 
+        // 🔹 (추가) 이 업로드 한 건에 대해 자동 AI 분석을 백그라운드로 수행
+        runAutoExtractionForUpload(data, rawText).catch(err => {
+          console.error(
+            `[AUTO AI] 업로드 ${data.id} 자동 분석 실패:`,
+            err,
+          )
+        })
+      }
       // 4) 최종 응답 (raw_text 포함)
       return res.status(201).json(data)
     } catch (e) {
@@ -705,12 +772,13 @@ app.post(['/uploads/:id/log', '/api/uploads/:id/log'], async (req, res) => {
     // 8) ingest_uploads 의 student_id / status 업데이트
     const firstStudentId = rows[0].student_id
 
-    const { error: upErr } = await supabase
+const { error: upErr } = await supabase
       .from('ingest_uploads')
       .update({
         student_id: firstStudentId,
-        status: 'success',
-        progress: 100,
+        status: 'success', // [중요] DB 상태를 완료로 변경
+        progress: 100,     // [중요] 진행률 100%
+        updated_at: new Date().toISOString()
       })
       .eq('id', id)
 
@@ -1433,7 +1501,7 @@ app.get('/api/dashboard', async (req, res) => {
     let query = supabase
       .from('log_entries')
       .select(
-        'log_date, emotion_tag, related_metrics, activity_tags, log_content, created_at',
+        'id, log_date, emotion_tag, related_metrics, activity_tags, log_content, created_at',
       )
 
     const rawStudentId = studentId || null
@@ -1465,7 +1533,10 @@ app.get('/api/dashboard', async (req, res) => {
     const emotionCounts = {}
     const emotionDetailMap = {}
     const byDate = {}
-    const activityDetails = []
+    
+    // [수정] 변수 선언 누락 수정 및 초기화
+    const activityDetails = [] 
+    const activityAbilityList = [] 
 
     logs.forEach(l => {
       const date =
@@ -1474,7 +1545,7 @@ app.get('/api/dashboard', async (req, res) => {
 
       const emotionName = (l.emotion_tag || '감정 미기록').toString()
 
-      // 🔸 related_metrics 가 jsonb[] 인 경우 첫 번째 요소 사용
+      // related_metrics 처리
       const rmRaw = l.related_metrics
       const rm =
         Array.isArray(rmRaw) && rmRaw.length > 0
@@ -1492,6 +1563,7 @@ app.get('/api/dashboard', async (req, res) => {
       const activityType =
         rm.activity_type || rm.activityType || rm.group_type || null
 
+      // 감정 카운트
       if (!emotionCounts[emotionName]) emotionCounts[emotionName] = 0
       emotionCounts[emotionName]++
 
@@ -1512,16 +1584,40 @@ app.get('/api/dashboard', async (req, res) => {
         if (activityName) detail.dates[date].activities.add(activityName)
       }
 
+      // 시간 계산
       const minutes =
         typeof rm.minutes === 'number'
           ? rm.minutes
           : typeof rm.duration_minutes === 'number'
           ? rm.duration_minutes
-          : 30
+          : 0 // 기본값 0
 
       if (date) {
         byDate[date] = (byDate[date] || 0) + minutes
       }
+
+      // 활동 능력 리스트 구성
+      const level = rm.level || '보통'
+      let levelType = 'good'
+      if (level.includes('우수') || level.includes('탁월')) levelType = 'excellent'
+      else if (level.includes('도전') || level.includes('노력')) levelType = 'challenge'
+      
+      const score = typeof rm.score === 'number' ? rm.score : 0
+
+      // [수정] activityAbilityList에 안전하게 push
+      activityAbilityList.push({
+        id: l.id,
+        activity: activityName || '활동',
+        date: date || '',
+        levelType,
+        levelLabel: level,
+        difficultyRatio: 0, 
+        normalRatio: 0,
+        goodRatio: 0,
+        totalScore: score,
+        hours: minutes ? `${Math.floor(minutes / 60)}시간 ${minutes % 60}분` : '0시간 0분',
+        mainSkills: Array.isArray(rm.ability) ? rm.ability : [],
+      })
 
       activityDetails.push({
         date,
@@ -1565,8 +1661,6 @@ app.get('/api/dashboard', async (req, res) => {
     const metrics = {
       recordCount,
     }
-
-    const activityAbilityList = []
 
     return res.json({
       metrics,

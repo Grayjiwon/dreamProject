@@ -8,6 +8,12 @@ export default defineConfig({
     charset: 'utf8',
   },
   server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
+    },
     headers: {
       'Content-Language': 'ko',
     },
