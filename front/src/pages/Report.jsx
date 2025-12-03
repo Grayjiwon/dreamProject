@@ -129,16 +129,30 @@ function normalizeReportRuns(rawRuns) {
       createdAt,
       expiresAt,
       status: run.status || 'completed',
-      // 백엔드의 다운로드 경로 (params.markdown이 있으면 거기서 다운로드됨)
       mdDownloadPath:
         firstMd?.download_path ||
         (run.id ? `/report-runs/${run.id}/download?format=md` : null),
-      raw: run, // 원본 데이터 보존 (params 접근용)
+      raw: run,
       purposeLabel,
       analysisFrom,
       analysisTo,
     }
   })
+}
+
+// 학생 이름/별칭 label 생성 헬퍼
+function getStudentLabel(student) {
+  if (!student) return '학생'
+  const name =
+    student.name ||
+    student.student_name ||
+    ''
+  const alias =
+    student.alias ||
+    student.student_alias ||
+    ''
+  if (name && alias) return `${name}(${alias})`
+  return name || alias || '학생'
 }
 
 export default function Report() {
@@ -173,6 +187,22 @@ export default function Report() {
   const isInvalidRange =
     filterMode === 'range' && startDate && endDate && startDate > endDate
 
+  // 🔹 현재 선택 상태로 "생성 가능 여부" 계산 (버튼 비활성화용)
+  const fromValue =
+    filterMode === 'range'
+      ? startDate || null
+      : singleDate || null
+
+  const canGenerate =
+    !!fromValue &&
+    !isInvalidRange &&
+    studentId &&
+    studentId !== 'all' &&
+    category &&
+    category !== 'all' &&
+    purpose &&
+    purpose !== 'all'
+
   async function fetchReports() {
     setLoading(true)
     setError(null)
@@ -194,7 +224,6 @@ export default function Report() {
           return createdBy === userId
         })
       }
-      // 최신순 정렬
       normalized.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       setReports(normalized)
     } catch (err) {
@@ -209,12 +238,43 @@ export default function Report() {
     setStudentsLoading(true)
     setStudentsError(null)
     try {
-      // 리포트 생성에서는 "재학중" 학생만 조회
       const data = await apiFetch(
         `/api/students?limit=1000&status=${encodeURIComponent('재학중')}`,
       )
-      const items = Array.isArray(data?.items) ? data.items : data || []
-      setStudents(items)
+      const items = Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data)
+        ? data
+        : []
+
+      const normalized = items
+        .map(s => {
+          const id = s.id ?? s.student_id ?? s.uuid
+          if (!id) return null
+          const name =
+            s.name ??
+            s.student_name ??
+            s.full_name ??
+            '이름 없음'
+          const alias =
+            s.alias ??
+            s.student_alias ??
+            ''
+          const label =
+            name && alias
+              ? `${name}(${alias})`
+              : name || alias || '이름 없음'
+          return {
+            ...s,
+            id,
+            name,
+            alias,
+            label,
+          }
+        })
+        .filter(Boolean)
+
+      setStudents(normalized)
     } catch (err) {
       console.error(err)
       setStudentsError('학생 목록을 불러오지 못했습니다.')
@@ -281,7 +341,6 @@ export default function Report() {
     setStudentId('all')
     setPurpose('all')
 
-    // 날짜는 다시 최근 1개월로
     const today = new Date()
     const end = today.toISOString().slice(0, 10)
     const past = new Date()
@@ -350,11 +409,10 @@ export default function Report() {
     setEndDate(toDate)
   }
 
-  // 🔹 md 리포트 다운로드 (핵심 수정됨)
+  // 🔹 md 리포트 다운로드
   async function handleDownloadMd(report) {
     const fileName = `${report.studentName || 'report'}_${report.createdAt?.slice(0, 10)}.md`
 
-    // 1) 이미 로드된 데이터(params.markdown)가 있는지 확인
     const markdownFromParams = report?.raw?.params?.markdown
     if (markdownFromParams && typeof markdownFromParams === 'string') {
       try {
@@ -370,18 +428,15 @@ export default function Report() {
         return
       } catch (err) {
         console.error('클라이언트 다운로드 오류:', err)
-        // 실패 시 서버 요청으로 폴백
       }
     }
 
-    // 2) 데이터가 없으면 백엔드 다운로드 API 호출
     const path = report.mdDownloadPath
     if (!path) {
       alert('다운로드 경로가 없습니다.')
       return
     }
 
-    // 절대 URL이 아니면 API_BASE 붙이기
     const url = path.startsWith('http') ? path : `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`
 
     try {
@@ -418,9 +473,21 @@ export default function Report() {
       alert('날짜를 선택해 주세요.')
       return
     }
-    // 🔸 학생이 "전체"인 상태에서는 생성 불가
+
     if (!studentId || studentId === 'all') {
       alert('학생을 선택해 주세요. (전체 학생에 대한 리포트는 생성할 수 없습니다.)')
+      return
+    }
+
+    // 🔹 카테고리 전체 선택 방지
+    if (!category || category === 'all') {
+      alert('카테고리를 선택해 주세요. (전체 카테고리는 리포트 생성에 사용할 수 없습니다.)')
+      return
+    }
+
+    // 🔹 용도 전체 선택 방지
+    if (!purpose || purpose === 'all') {
+      alert('용도를 선택해 주세요. (전체 용도는 리포트 생성에 사용할 수 없습니다.)')
       return
     }
 
@@ -429,7 +496,6 @@ export default function Report() {
     setGenerateError(null)
 
     try {
-      // 데이터 수집 (프로필, 통계, 로그)
       const [studentProfile, summaryStats, activityLogs] = await Promise.all([
         apiFetch(`/api/students/${encodeURIComponent(studentId)}`).catch(() => null),
         apiFetch(`/api/dashboard?studentId=${studentId}&from=${from}&to=${to}`).catch(() => null),
@@ -438,15 +504,55 @@ export default function Report() {
         ).catch(() => null),
       ])
 
-      const activitySamples =
-        activityLogs?.items?.map(item => ({
+      const logItems = Array.isArray(activityLogs?.items)
+        ? activityLogs.items
+        : Array.isArray(activityLogs)
+        ? activityLogs
+        : []
+
+      const activitySamples = logItems.map(item => {
+        const metrics0 = Array.isArray(item.related_metrics)
+          ? item.related_metrics[0]
+          : item.related_metrics && typeof item.related_metrics === 'object'
+          ? item.related_metrics
+          : null
+
+        const activities =
+          (metrics0 && Array.isArray(metrics0.activities)
+            ? metrics0.activities
+            : []) || []
+
+        const note =
+          (metrics0 && (metrics0.note || metrics0.notes)) ||
+          ''
+
+        const emotionSummary =
+          (metrics0 &&
+            (metrics0.emotionSummary || metrics0.emotion_summary)) ||
+          item.emotion_tag ||
+          ''
+
+        return {
           id: item.id,
-          date: item.log_date,
-          emotion_tag: item.emotion_tag,
-          activity_tags: item.activity_tags,
-          log_content: item.log_content,
-          related_metrics: item.related_metrics,
-        })) || []
+          date:
+            item.log_date ||
+            (item.created_at &&
+              String(item.created_at).slice(0, 10)) ||
+            null,
+          emotion_tag: item.emotion_tag || null,
+          emotion_tags:
+            item.emotion_tags ||
+            metrics0?.emotionTags ||
+            metrics0?.emotion_tags ||
+            null,
+          activity_tags: item.activity_tags || [],
+          log_content: item.log_content || '',
+          related_metrics: item.related_metrics || [],
+          activities,
+          note,
+          emotionSummary,
+        }
+      })
 
       const effectivePurpose =
         !purpose || purpose === 'all' ? 'all' : purpose
@@ -473,20 +579,20 @@ export default function Report() {
         },
       }
 
-      // 1. Gemini로 리포트 생성
       const result = await generateReportWithGemini(aiPayload)
       const markdown = result.markdown || result.text || ''
       if (!markdown) throw new Error('AI가 리포트 내용을 반환하지 않았습니다.')
 
-      // 2. DB 저장
-      const studentName =
-        studentProfile?.name ||
-        students.find(s => s.id === studentId)?.name ||
-        '학생'
+      const profileStudent =
+        studentProfile ||
+        students.find(s => s.id === studentId) ||
+        null
+      const studentLabel = getStudentLabel(profileStudent)
+
       const dateLabel =
         from && to && from !== to ? `${from} ~ ${to}` : from || ''
       const categoryLabel = categoryConfig.label || '종합 리포트'
-      const title = `${studentName} ${dateLabel} ${categoryLabel}`.trim()
+      const title = `${studentLabel} ${dateLabel} ${categoryLabel}`.trim()
 
       let purposeLabel = null
       if (effectivePurpose === 'parent') purposeLabel = '학부모 상담용'
@@ -503,8 +609,8 @@ export default function Report() {
         purpose: effectivePurpose,
         purpose_label: purposeLabel,
         student_id: studentId,
-        student_name: studentName,
-        markdown, // 🚨 핵심: AI가 생성한 마크다운을 여기에 포함
+        student_name: studentLabel,   // ✅ 이름(별칭) label 사용
+        markdown,
         created_by_user_id: currentUser?.id,
         created_by_name:
           currentUser?.display_name || currentUser?.email,
@@ -515,11 +621,11 @@ export default function Report() {
         body: {
           template_code: 'ai_markdown',
           requested_by: currentUser?.id,
-          params: reportParams, // params 내부에 markdown 포함됨
+          params: reportParams,
         },
       })
 
-      // 목록 갱신
+      // 🔹 생성 직후 목록 자동 갱신
       await fetchReports()
       alert('AI 리포트가 성공적으로 생성되었습니다.')
     } catch (err) {
@@ -553,7 +659,7 @@ export default function Report() {
                   <div>
                     <div className="card-title">리포트 제작 설정</div>
                     <div className="muted" style={{ fontSize: 13 }}>
-                      날짜, 카테고리, 학생을 선택하여 AI 리포트를 생성합니다.
+                      날짜, 카테고리, 학생, 용도를 선택하여 AI 리포트를 생성합니다.
                     </div>
                     {studentsLoading && (
                       <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
@@ -652,7 +758,7 @@ export default function Report() {
                       <option value="all">전체</option>
                       {students.map(s => (
                         <option key={s.id} value={s.id}>
-                          {s.name}
+                          {s.label || getStudentLabel(s)}
                         </option>
                       ))}
                     </select>
@@ -729,7 +835,7 @@ export default function Report() {
                       type="button"
                       className="btn secondary report-ai-btn"
                       onClick={handleGenerateAiReport}
-                      disabled={generating}
+                      disabled={generating || !canGenerate}
                     >
                       {generating ? '생성 중...' : 'AI 리포트 생성(.md)'}
                     </button>

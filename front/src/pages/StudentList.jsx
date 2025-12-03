@@ -64,13 +64,14 @@ export default function StudentList() {
   const [newAlias, setNewAlias] = useState('')
   const [newSchoolLevel, setNewSchoolLevel] = useState('')
   const [newMemo, setNewMemo] = useState('')
+
   const [creating, setCreating] = useState(false)
 
-  // ▶ 수정용 모달 상태
+  // ▶ 학생 수정용 모달 상태
   const [editingStudent, setEditingStudent] = useState(null)
   const [editForm, setEditForm] = useState({
     name: '',
-    status: '',
+    status: '재학중',
     admission_date: '',
     birth_date: '',
     alias: '',
@@ -79,10 +80,7 @@ export default function StudentList() {
   })
   const [savingEdit, setSavingEdit] = useState(false)
 
-  // ▶ 삭제 처리 중인 학생 id
-  const [deletingId, setDeletingId] = useState(null)
-
-  // -------------------- 초기 학생 목록 조회 --------------------
+  // -------------------- 학생 목록 불러오기 --------------------
   useEffect(() => {
     fetchStudents()
   }, [])
@@ -92,15 +90,29 @@ export default function StudentList() {
       setLoading(true)
       setError('')
 
-      const res = await apiFetch('/api/students?limit=200&offset=0')
+      const res = await apiFetch('/api/students')
       const list = normalizeStudentsResponse(res)
+
       const enhanced = list.map(s => {
         const decoded = decodeStudentNotes(s.notes)
+        const alias =
+          (s.alias !== undefined && s.alias !== null && s.alias !== '')
+            ? s.alias
+            : decoded.alias
+        const schoolLevel =
+          s.school_level ||
+          s.schoolLevel ||
+          decoded.schoolLevel
+        const memo =
+          (s.memo !== undefined && s.memo !== null && s.memo !== '')
+            ? s.memo
+            : decoded.memo
+
         return {
           ...s,
-          alias: decoded.alias,
-          schoolLevel: decoded.schoolLevel,
-          memo: decoded.memo,
+          alias,
+          schoolLevel,
+          memo,
         }
       })
       setStudents(enhanced)
@@ -128,9 +140,12 @@ export default function StudentList() {
 
       const payload = {
         name: newName.trim(),
+        alias: newAlias || null,
         status: newStatus || null,
         admission_date: newAdmissionDate || null,
         birth_date: newBirthDate || null,
+        school_level: newSchoolLevel || null,
+        memo: newMemo || null,
         notes,
       }
 
@@ -143,9 +158,12 @@ export default function StudentList() {
       const decoded = decodeStudentNotes(created.notes)
       const enhancedCreated = {
         ...created,
-        alias: decoded.alias,
-        schoolLevel: decoded.schoolLevel,
-        memo: decoded.memo,
+        alias: created.alias || decoded.alias,
+        schoolLevel:
+          created.school_level ||
+          created.schoolLevel ||
+          decoded.schoolLevel,
+        memo: created.memo || decoded.memo,
       }
 
       setStudents(prev => [...prev, enhancedCreated])
@@ -182,13 +200,17 @@ export default function StudentList() {
           ? String(student.birth_date).slice(0, 10)
           : '',
         alias: student.alias || decoded.alias || '',
-        schoolLevel: student.schoolLevel || decoded.schoolLevel || '',
+        schoolLevel:
+          student.school_level ||
+          student.schoolLevel ||
+          decoded.schoolLevel ||
+          '',
         memo: student.memo || decoded.memo || '',
       })
     } else {
       setEditForm({
         name: '',
-        status: '',
+        status: '재학중',
         admission_date: '',
         birth_date: '',
         alias: '',
@@ -200,6 +222,15 @@ export default function StudentList() {
 
   function closeEditModal() {
     setEditingStudent(null)
+    setEditForm({
+      name: '',
+      status: '재학중',
+      admission_date: '',
+      birth_date: '',
+      alias: '',
+      schoolLevel: '',
+      memo: '',
+    })
   }
 
   function handleEditChange(e) {
@@ -223,9 +254,12 @@ export default function StudentList() {
 
       const payload = {
         name: editForm.name,
+        alias: editForm.alias || null,
         status: editForm.status || null,
         admission_date: editForm.admission_date || null,
         birth_date: editForm.birth_date || null,
+        school_level: editForm.schoolLevel || null,
+        memo: editForm.memo || null,
         notes,
       }
 
@@ -238,9 +272,12 @@ export default function StudentList() {
       const decoded = decodeStudentNotes(updated.notes)
       const enhancedUpdated = {
         ...updated,
-        alias: decoded.alias,
-        schoolLevel: decoded.schoolLevel,
-        memo: decoded.memo,
+        alias: updated.alias || decoded.alias,
+        schoolLevel:
+          updated.school_level ||
+          updated.schoolLevel ||
+          decoded.schoolLevel,
+        memo: updated.memo || decoded.memo,
       }
 
       setStudents(prev =>
@@ -262,26 +299,21 @@ export default function StudentList() {
     if (!window.confirm(`"${student.name}" 학생을 정말 삭제하시겠어요?`)) return
 
     try {
-      setDeletingId(student.id)
-      setError('')
-
       await apiFetch(`/api/students/${student.id}`, {
         method: 'DELETE',
       })
-
       setStudents(prev => prev.filter(s => s.id !== student.id))
     } catch (e) {
       console.error(e)
-      setError(e.message || '학생 삭제 중 오류가 발생했습니다.')
-    } finally {
-      setDeletingId(null)
+      setError('학생 삭제 중 오류가 발생했습니다.')
     }
   }
 
+  // -------------------- 화면 표시용 이름 규칙 --------------------
   function getDisplayName(student) {
     const name = student.name || ''
     const alias = student.alias || ''
-    if (alias && name) return `${alias}(${name})`
+    if (name && alias) return `${name}(${alias})`
     return name || alias || '이름 없음'
   }
 
@@ -299,326 +331,198 @@ export default function StudentList() {
             marginBottom: 16,
           }}
         >
-          <div>
-            <h1 style={{ fontSize: 20, fontWeight: 600, marginBottom: 4 }}>
-              학생 관리
-            </h1>
-            <p className="muted" style={{ fontSize: 13 }}>
-              학생을 추가/수정/삭제 할 수 있습니다. (별칭과 학교 단계를 함께 관리해 보세요)
-            </p>
-          </div>
+          <h1
+            style={{
+              fontSize: 20,
+              fontWeight: 600,
+              margin: 0,
+            }}
+          >
+            학생 관리
+          </h1>
         </div>
 
-        {/* 에러 / 로딩 */}
+        {/* 에러 메시지 */}
         {error && (
           <div
             style={{
               marginBottom: 12,
-              padding: '8px 12px',
-              borderRadius: 10,
-              background: '#fef2f2',
+              padding: 8,
+              borderRadius: 4,
+              backgroundColor: '#fee2e2',
               color: '#b91c1c',
-              fontSize: 13,
+              fontSize: 14,
             }}
           >
             {error}
           </div>
         )}
 
-        {loading && (
-          <div className="muted" style={{ marginBottom: 8, fontSize: 13 }}>
-            학생 목록을 불러오는 중입니다...
-          </div>
-        )}
-
-        {/* ▶ 학생 추가 폼 */}
-        <div
-          className="card"
+        {/* 학생 추가 폼 */}
+        <form
+          onSubmit={handleCreate}
           style={{
             marginBottom: 16,
-            padding: 16,
-            borderRadius: 16,
+            padding: 12,
+            borderRadius: 8,
             border: '1px solid #e5e7eb',
-            background: '#ffffff',
+            backgroundColor: '#f9fafb',
           }}
         >
-          <form onSubmit={handleCreate}>
-            {/* 1행: 이름 + 별칭 + 학교단계 + 상태 */}
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: 16,
-                alignItems: 'center',
-                marginBottom: 8,
-              }}
-            >
-              {/* 학생 이름 */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 13,
-                    color: '#6b7280',
-                    minWidth: 64,
-                    flexShrink: 0,
-                  }}
-                >
-                  학생 이름
-                </span>
-                <input
-                  className="app-input"
-                  type="text"
-                  placeholder="예: 홍길동"
-                  value={newName}
-                  onChange={e => setNewName(e.target.value)}
-                  style={{
-                    width: 140,
-                  }}
-                />
-              </div>
-
-              {/* 별칭(alias) */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 13,
-                    color: '#6b7280',
-                    minWidth: 52,
-                    flexShrink: 0,
-                  }}
-                >
-                  별칭
-                </span>
-                <input
-                  className="app-input"
-                  type="text"
-                  placeholder="예: 꽃사슴"
-                  value={newAlias}
-                  onChange={e => setNewAlias(e.target.value)}
-                  style={{
-                    width: 140,
-                  }}
-                />
-              </div>
-
-              {/* 학교 단계 */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 13,
-                    color: '#6b7280',
-                    minWidth: 64,
-                    flexShrink: 0,
-                  }}
-                >
-                  학교 단계
-                </span>
-                <select
-                  className="app-input"
-                  value={newSchoolLevel}
-                  onChange={e => setNewSchoolLevel(e.target.value)}
-                  style={{
-                    width: 120,
-                    paddingRight: 28,
-                  }}
-                >
-                  <option value="">선택 없음</option>
-                  {SCHOOL_LEVEL_OPTIONS.filter(x => x).map(opt => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* 상태 */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 13,
-                    color: '#6b7280',
-                    minWidth: 40,
-                    flexShrink: 0,
-                  }}
-                >
-                  상태
-                </span>
-                <select
-                  className="app-input"
-                  value={newStatus}
-                  onChange={e => setNewStatus(e.target.value)}
-                  style={{
-                    width: 120,
-                    paddingRight: 28,
-                  }}
-                >
-                  {STATUS_OPTIONS.map(opt => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* 2행: 입학일 + 생년월일 */}
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: 16,
-                alignItems: 'center',
-                marginBottom: 8,
-              }}
-            >
-              {/* 입학일 */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 13,
-                    color: '#6b7280',
-                    minWidth: 48,
-                    flexShrink: 0,
-                  }}
-                >
-                  입학일
-                </span>
-                <input
-                  className="app-input"
-                  type="date"
-                  value={newAdmissionDate}
-                  onChange={e => setNewAdmissionDate(e.target.value)}
-                  style={{
-                    width: 140,
-                    borderRadius: 999,
-                  }}
-                />
-              </div>
-
-              {/* 생년월일 */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 13,
-                    color: '#6b7280',
-                    minWidth: 60,
-                    flexShrink: 0,
-                  }}
-                >
-                  생년월일
-                </span>
-                <input
-                  className="app-input"
-                  type="date"
-                  value={newBirthDate}
-                  onChange={e => setNewBirthDate(e.target.value)}
-                  style={{
-                    width: 140,
-                    borderRadius: 999,
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* 3행: 메모 (넓은 textarea) */}
-            <div style={{ marginBottom: 8 }}>
-              <div
-                style={{
-                  fontSize: 13,
-                  color: '#6b7280',
-                  marginBottom: 4,
-                }}
-              >
-                메모(별명/특이사항)
-              </div>
-              <textarea
-                className="app-textarea"
-                placeholder="예: 좋아하는 활동, 특이사항 등을 적어주세요."
-                value={newMemo}
-                onChange={e => setNewMemo(e.target.value)}
-                rows={4}
-                style={{
-                  width: '98%',
-                  minWidth: 200,
-                  fontSize: 13,
-                }}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+              gap: 8,
+              marginBottom: 8,
+            }}
+          >
+            {/* 이름 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={{ fontSize: 12, color: '#4b5563' }}>이름</label>
+              <input
+                type="text"
+                value={newName}
+                onChange={e => setNewName(e.target.value)}
+                className="app-input"
+                style={{ padding: '6px 8px', fontSize: 14 }}
               />
             </div>
 
-            {/* 하단: 학생 추가 버튼 (컨테이너 하단 우측) */}
-            <div
+            {/* 별칭 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={{ fontSize: 12, color: '#4b5563' }}>별칭</label>
+              <input
+                type="text"
+                value={newAlias}
+                onChange={e => setNewAlias(e.target.value)}
+                className="app-input"
+                style={{ padding: '6px 8px', fontSize: 14 }}
+              />
+            </div>
+
+            {/* 상태 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={{ fontSize: 12, color: '#4b5563' }}>상태</label>
+              <select
+                value={newStatus}
+                onChange={e => setNewStatus(e.target.value)}
+                className="app-input"
+                style={{ padding: '6px 8px', fontSize: 14 }}
+              >
+                {STATUS_OPTIONS.map(opt => (
+                  <option key={opt} value={opt}>
+                    {opt}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* 학교 단계 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={{ fontSize: 12, color: '#4b5563' }}>학교 단계</label>
+              <select
+                value={newSchoolLevel}
+                onChange={e => setNewSchoolLevel(e.target.value)}
+                className="app-input"
+                style={{ padding: '6px 8px', fontSize: 14 }}
+              >
+                {SCHOOL_LEVEL_OPTIONS.map(opt => (
+                  <option key={opt} value={opt}>
+                    {opt || '선택 안 함'}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+              gap: 8,
+              marginBottom: 8,
+            }}
+          >
+            {/* 입학일 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={{ fontSize: 12, color: '#4b5563' }}>입학일</label>
+              <input
+                type="date"
+                value={newAdmissionDate}
+                onChange={e => setNewAdmissionDate(e.target.value)}
+                className="app-input"
+                style={{ padding: '6px 8px', fontSize: 14 }}
+              />
+            </div>
+
+            {/* 생년월일 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={{ fontSize: 12, color: '#4b5563' }}>생년월일</label>
+              <input
+                type="date"
+                value={newBirthDate}
+                onChange={e => setNewBirthDate(e.target.value)}
+                className="app-input"
+                style={{ padding: '6px 8px', fontSize: 14 }}
+              />
+            </div>
+          </div>
+
+          {/* 메모 */}
+          <div style={{ marginBottom: 8 }}>
+            <label
               style={{
-                display: 'flex',
-                justifyContent: 'flex-end',
-                marginTop: 4,
+                display: 'block',
+                marginBottom: 4,
+                fontSize: 12,
+                color: '#4b5563',
               }}
             >
-              <button
-                type="submit"
-                className="btn primary"
-                disabled={creating}
-                style={{
-                  padding: '8px 14px',
-                  borderRadius: 999,
-                  border: 'none',
-                  fontSize: 14,
-                  fontWeight: 500,
-                  background: '#2563eb',
-                  color: '#ffffff',
-                  cursor: creating ? 'default' : 'pointer',
-                  opacity: creating ? 0.7 : 1,
-                }}
-              >
-                {creating ? '추가 중...' : '학생 추가'}
-              </button>
-            </div>
-          </form>
-        </div>
+              메모
+            </label>
+            <textarea
+              value={newMemo}
+              onChange={e => setNewMemo(e.target.value)}
+              rows={3}
+              className="app-input"
+              style={{ width: '100%', fontSize: 14, padding: 8, resize: 'vertical' }}
+            />
+          </div>
 
-        {/* ▶ 학생 목록 테이블 */}
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'flex-end',
+              marginTop: 8,
+            }}
+          >
+            <button
+              type="submit"
+              disabled={creating}
+              className="app-button"
+              style={{
+                padding: '6px 12px',
+                fontSize: 14,
+                borderRadius: 6,
+                border: 'none',
+                backgroundColor: creating ? '#9ca3af' : '#2563eb',
+                color: '#ffffff',
+                cursor: creating ? 'default' : 'pointer',
+              }}
+            >
+              {creating ? '추가 중...' : '학생 추가'}
+            </button>
+          </div>
+        </form>
+
+        {/* 학생 목록 테이블 */}
         <div
-          className="card"
           style={{
-            borderRadius: 16,
+            borderRadius: 8,
             border: '1px solid #e5e7eb',
-            background: '#ffffff',
             overflow: 'hidden',
+            backgroundColor: '#ffffff',
           }}
         >
           <table
@@ -628,169 +532,158 @@ export default function StudentList() {
               fontSize: 14,
             }}
           >
-            <thead
-              style={{
-                background: '#f9fafb',
-                borderBottom: '1px solid #e5e7eb',
-              }}
-            >
-              <tr>
-                <th
-                  style={{
-                    textAlign: 'left',
-                    padding: '10px 12px',
-                    fontWeight: 500,
-                    fontSize: 13,
-                    color: '#6b7280',
-                  }}
-                >
-                  이름(별칭)
+            <thead>
+              <tr
+                style={{
+                  backgroundColor: '#f3f4f6',
+                  textAlign: 'left',
+                }}
+              >
+                <th style={{ padding: '8px 10px', borderBottom: '1px solid #e5e7eb' }}>
+                  이름 / 별칭
                 </th>
-                <th
-                  style={{
-                    textAlign: 'left',
-                    padding: '10px 12px',
-                    fontWeight: 500,
-                    fontSize: 13,
-                    color: '#6b7280',
-                  }}
-                >
-                  학교 단계
-                </th>
-                <th
-                  style={{
-                    textAlign: 'left',
-                    padding: '10px 12px',
-                    fontWeight: 500,
-                    fontSize: 13,
-                    color: '#6b7280',
-                  }}
-                >
+                <th style={{ padding: '8px 10px', borderBottom: '1px solid #e5e7eb' }}>
                   상태
                 </th>
-                <th
-                  style={{
-                    textAlign: 'left',
-                    padding: '10px 12px',
-                    fontWeight: 500,
-                    fontSize: 13,
-                    color: '#6b7280',
-                  }}
-                >
+                <th style={{ padding: '8px 10px', borderBottom: '1px solid #e5e7eb' }}>
+                  학교 단계
+                </th>
+                <th style={{ padding: '8px 10px', borderBottom: '1px solid #e5e7eb' }}>
                   입학일
                 </th>
-                <th
-                  style={{
-                    textAlign: 'left',
-                    padding: '10px 12px',
-                    fontWeight: 500,
-                    fontSize: 13,
-                    color: '#6b7280',
-                  }}
-                >
-                  비고(메모)
+                <th style={{ padding: '8px 10px', borderBottom: '1px solid #e5e7eb' }}>
+                  생년월일
+                </th>
+                <th style={{ padding: '8px 10px', borderBottom: '1px solid #e5e7eb' }}>
+                  메모
                 </th>
                 <th
                   style={{
-                    width: 180,
-                    textAlign: 'right',
-                    padding: '10px 12px',
-                    fontWeight: 500,
-                    fontSize: 13,
-                    color: '#6b7280',
+                    padding: '8px 10px',
+                    borderBottom: '1px solid #e5e7eb',
+                    width: 120,
                   }}
                 >
-                  작업
+                  수정
                 </th>
               </tr>
             </thead>
             <tbody>
-              {students.length === 0 ? (
+              {loading ? (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={7}
                     style={{
-                      padding: '14px 12px',
-                      fontSize: 13,
+                      padding: 12,
+                      textAlign: 'center',
                       color: '#6b7280',
                     }}
                   >
-                    학생이 없습니다. 상단에서 새 학생을 추가해보세요.
+                    불러오는 중...
+                  </td>
+                </tr>
+              ) : students.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={7}
+                    style={{
+                      padding: 12,
+                      textAlign: 'center',
+                      color: '#6b7280',
+                    }}
+                  >
+                    등록된 학생이 없습니다.
                   </td>
                 </tr>
               ) : (
-                students.map(student => {
-                  const displayName = getDisplayName(student)
-                  const statusLabel = student.status || '재학중'
-                  const admissionDate = student.admission_date
-                    ? String(student.admission_date).slice(0, 10)
-                    : ''
-
-                  return (
-                    <tr
-                      key={student.id}
-                      style={{ borderBottom: '1px solid #f3f4f6' }}
+                students.map(student => (
+                  <tr key={student.id}>
+                    <td
+                      style={{
+                        padding: '8px 10px',
+                        borderBottom: '1px solid #f3f4f6',
+                      }}
                     >
-                      <td style={{ padding: '10px 12px' }}>{displayName}</td>
-                      <td
+                      <div style={{ fontWeight: 500 }}>{getDisplayName(student)}</div>
+                      {student.alias && (
+                        <div
+                          style={{
+                            fontSize: 12,
+                            color: '#6b7280',
+                          }}
+                        >
+                          별칭: {student.alias}
+                        </div>
+                      )}
+                    </td>
+                    <td
+                      style={{
+                        padding: '8px 10px',
+                        borderBottom: '1px solid #f3f4f6',
+                      }}
+                    >
+                      {student.status || '-'}
+                    </td>
+                    <td
+                      style={{
+                        padding: '8px 10px',
+                        borderBottom: '1px solid #f3f4f6',
+                      }}
+                    >
+                      {student.schoolLevel || '-'}
+                    </td>
+                    <td
+                      style={{
+                        padding: '8px 10px',
+                        borderBottom: '1px solid #f3f4f6',
+                      }}
+                    >
+                      {student.admission_date
+                        ? String(student.admission_date).slice(0, 10)
+                        : '-'}
+                    </td>
+                    <td
+                      style={{
+                        padding: '8px 10px',
+                        borderBottom: '1px solid #f3f4f6',
+                      }}
+                    >
+                      {student.birth_date
+                        ? String(student.birth_date).slice(0, 10)
+                        : '-'}
+                    </td>
+                    <td
+                      style={{
+                        padding: '8px 10px',
+                        borderBottom: '1px solid #f3f4f6',
+                        whiteSpace: 'pre-wrap',
+                      }}
+                    >
+                      {student.memo || ''}
+                    </td>
+                    <td
+                      style={{
+                        padding: '8px 10px',
+                        borderBottom: '1px solid #f3f4f6',
+                      }}
+                    >
+                      <div
                         style={{
-                          padding: '10px 12px',
-                          fontSize: 13,
-                          color: '#4b5563',
-                        }}
-                      >
-                        {student.schoolLevel || '-'}
-                      </td>
-                      <td
-                        style={{
-                          padding: '10px 12px',
-                          fontSize: 13,
-                          color: '#4b5563',
-                        }}
-                      >
-                        {statusLabel}
-                      </td>
-                      <td
-                        style={{
-                          padding: '10px 12px',
-                          fontSize: 13,
-                          color: '#4b5563',
-                        }}
-                      >
-                        {admissionDate || '-'}
-                      </td>
-                      <td
-                        style={{
-                          padding: '10px 12px',
-                          fontSize: 13,
-                          color: '#6b7280',
-                          maxWidth: 260,
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                          overflow: 'hidden',
-                        }}
-                        title={student.memo || student.notes || ''}
-                      >
-                        {student.memo || student.notes || ''}
-                      </td>
-                      <td
-                        style={{
-                          padding: '10px 12px',
-                          textAlign: 'right',
-                          whiteSpace: 'nowrap',
+                          display: 'flex',
+                          gap: 4,
                         }}
                       >
                         <button
                           type="button"
-                          className="btn secondary"
                           onClick={() => openEditModal(student)}
+                          className="app-button"
                           style={{
-                            marginRight: 8,
-                            padding: '6px 10px',
-                            borderRadius: 999,
-                            border: '1px solid #d1d5db',
-                            background: '#ffffff',
-                            fontSize: 13,
+                            flex: 1,
+                            padding: '4px 6px',
+                            fontSize: 12,
+                            borderRadius: 4,
+                            backgroundColor: '#ffffff',
+                            color : '#374151',
                             cursor: 'pointer',
                           }}
                         >
@@ -798,425 +691,297 @@ export default function StudentList() {
                         </button>
                         <button
                           type="button"
-                          className="btn danger"
                           onClick={() => handleDelete(student)}
-                          disabled={deletingId === student.id}
+                          className="app-button"
                           style={{
-                            padding: '6px 10px',
-                            borderRadius: 999,
-                            border: 'none',
-                            background: '#ef4444',
-                            color: '#ffffff',
-                            fontSize: 13,
-                            cursor:
-                              deletingId === student.id ? 'default' : 'pointer',
-                            opacity: deletingId === student.id ? 0.7 : 1,
+                            flex: 1,
+                            padding: '4px 6px',
+                            fontSize: 12,
+                            borderRadius: 4,
+                            border: '1px solid #fecaca',
+                            backgroundColor: '#fee2e2',
+                            color: '#b91c1c',
+                            cursor: 'pointer',
                           }}
                         >
-                          {deletingId === student.id ? '삭제 중...' : '삭제'}
+                          삭제
                         </button>
-                      </td>
-                    </tr>
-                  )
-                })
+                      </div>
+                    </td>
+                  </tr>
+                ))
               )}
             </tbody>
           </table>
         </div>
-      </div>
 
-            {/* 수정 모달 */}
-      {editingStudent && (
-        <div
-          className="modal-backdrop"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(15,23,42,0.35)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 50,
-          }}
-        >
+        {/* 수정 모달 */}
+        {editingStudent && (
           <div
-            className="modal"
             style={{
-              width: '100%',
-              maxWidth: 600,
-              borderRadius: 18,
-              background: '#ffffff',
-              position: 'relative',   
-              padding: 24,
-              boxShadow:
-                '0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)',
+              position: 'fixed',
+              inset: 0,
+              backgroundColor: 'rgba(0,0,0,0.45)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 50,
             }}
           >
-            {/* 헤더 */}
             <div
               style={{
-                marginBottom: 16,
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
+                width: '100%',
+                maxWidth: 640,
+                maxHeight: '90vh',
+                overflowY: 'auto',
+                backgroundColor: '#ffffff',
+                borderRadius: 12,
+                boxShadow: '0 10px 25px rgba(0,0,0,0.15)',
+                padding: 16,
               }}
             >
-              <div>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'flex-start',
+                  marginBottom: 12,
+                }}
+              >
                 <h2
                   style={{
                     fontSize: 18,
                     fontWeight: 600,
-                    marginBottom: 2,
+                    margin: 0,
                   }}
                 >
                   학생 정보 수정
                 </h2>
-                <p
+                <button
+                  type="button"
+                  onClick={closeEditModal}
                   style={{
-                    fontSize: 12,
-                    color: '#6b7280',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    fontSize: 18,
+                    lineHeight: 1,
+                    padding: 4,
+                    marginTop: -4, // X 버튼을 조금 더 위로
                   }}
                 >
-                  이름 · 별칭 · 학교 단계 · 메모를 한 번에 정리해 주세요.
-                </p>
+                  ×
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={closeEditModal}
-                style={{
-                  position: 'absolute',
-                  top: 18,
-                  right: 16,
-                  border: 'none',
-                  background: 'transparent',
-                  fontSize: 20,
-                  cursor: 'pointer',
-                  lineHeight: 1,
-                  color: '#9ca3af',
-                }}
-              >
-                ×
-              </button>
-            </div>
 
-            {/* 폼 본문 */}
-            <form
-              onSubmit={handleEditSave}
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr 1fr',
-                columnGap: 16,
-                rowGap: 12,
-              }}
-            >
-              {/* 이름 */}
-              <label
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 4,
-                  fontSize: 13,
-                }}
-              >
-                <span
+              <form onSubmit={handleEditSave}>
+                <div
                   style={{
-                    fontSize: 12,
-                    color: '#6b7280',
-                    fontWeight: 500,
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                    gap: 8,
+                    marginBottom: 8,
                   }}
                 >
-                  이름
-                </span>
-                <input
-                  type="text"
-                  name="name"
-                  value={editForm.name}
-                  onChange={handleEditChange}
-                  required
-                  style={{
-                    width: '50%',
-                    padding: '9px 12px',
-                    borderRadius: 12,
-                    border: '1px solid #d1d5db',
-                    fontSize: 14,
-                  }}
-                />
-              </label>
+                  {/* 이름 */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 4,
+                    }}
+                  >
+                    <label style={{ fontSize: 12, color: '#4b5563' }}>이름</label>
+                    <input
+                      type="text"
+                      name="name"
+                      value={editForm.name}
+                      onChange={handleEditChange}
+                      className="app-input"
+                      style={{ padding: '6px 8px', fontSize: 14 }}
+                    />
+                  </div>
 
-              {/* 별칭 */}
-              <label
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 4,
-                  fontSize: 13,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: '#6b7280',
-                    fontWeight: 500,
-                  }}
-                >
-                  별칭
-                </span>
-                <input
-                  type="text"
-                  name="alias"
-                  value={editForm.alias}
-                  onChange={handleEditChange}
-                  placeholder="동명이인 구분용 별칭"
-                  style={{
-                    width: '50%',
-                    padding: '9px 12px',
-                    borderRadius: 12,
-                    border: '1px solid #d1d5db',
-                    fontSize: 14,
-                  }}
-                />
-              </label>
+                  {/* 별칭 */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 4,
+                    }}
+                  >
+                    <label style={{ fontSize: 12, color: '#4b5563' }}>별칭</label>
+                    <input
+                      type="text"
+                      name="alias"
+                      value={editForm.alias}
+                      onChange={handleEditChange}
+                      className="app-input"
+                      style={{ padding: '6px 8px', fontSize: 14 }}
+                    />
+                  </div>
 
-              {/* 학교 단계 */}
-              <label
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 4,
-                  fontSize: 13,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: '#6b7280',
-                    fontWeight: 500,
-                  }}
-                >
-                  학교 단계
-                </span>
-                <select
-                  name="schoolLevel"
-                  value={editForm.schoolLevel}
-                  onChange={handleEditChange}
-                  style={{
-                    width: '50%',
-                    padding: '9px 12px',
-                    borderRadius: 12,
-                    border: '1px solid #d1d5db',
-                    fontSize: 14,
-                    backgroundColor: '#ffffff',
-                  }}
-                >
-                  <option value="">선택 없음</option>
-                  {SCHOOL_LEVEL_OPTIONS.filter(x => x).map(opt => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              {/* 상태 */}
-              <label
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 4,
-                  fontSize: 13,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: '#6b7280',
-                    fontWeight: 500,
-                  }}
-                >
-                  상태
-                </span>
-                {(() => {
-                  const hasCustomStatus =
-                    editForm.status &&
-                    !STATUS_OPTIONS.includes(editForm.status)
-                  const options = hasCustomStatus
-                    ? [editForm.status, ...STATUS_OPTIONS]
-                    : STATUS_OPTIONS
-
-                  return (
+                  {/* 상태 */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 4,
+                    }}
+                  >
+                    <label style={{ fontSize: 12, color: '#4b5563' }}>상태</label>
                     <select
                       name="status"
-                      value={editForm.status || ''}
+                      value={editForm.status}
                       onChange={handleEditChange}
-                      style={{
-                        width: '50%',
-                        padding: '9px 12px',
-                        borderRadius: 12,
-                        border: '1px solid #d1d5db',
-                        fontSize: 14,
-                        backgroundColor: '#ffffff',
-                      }}
+                      className="app-input"
+                      style={{ padding: '6px 8px', fontSize: 14 }}
                     >
-                      <option value="">선택 없음</option>
-                      {options.map(opt => (
+                      {STATUS_OPTIONS.map(opt => (
                         <option key={opt} value={opt}>
                           {opt}
                         </option>
                       ))}
                     </select>
-                  )
-                })()}
-              </label>
+                  </div>
 
-              {/* 입학일 */}
-              <label
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 4,
-                  fontSize: 13,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: '#6b7280',
-                    fontWeight: 500,
-                  }}
-                >
-                  입학일
-                </span>
-                <input
-                  type="date"
-                  name="admission_date"
-                  value={editForm.admission_date || ''}
-                  onChange={handleEditChange}
-                  style={{
-                    width: '50%',
-                    padding: '9px 12px',
-                    borderRadius: 12,
-                    border: '1px solid #d1d5db',
-                    fontSize: 14,
-                  }}
-                />
-              </label>
+                  {/* 학교 단계 */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 4,
+                    }}
+                  >
+                    <label style={{ fontSize: 12, color: '#4b5563' }}>
+                      학교 단계
+                    </label>
+                    <select
+                      name="schoolLevel"
+                      value={editForm.schoolLevel}
+                      onChange={handleEditChange}
+                      className="app-input"
+                      style={{ padding: '6px 8px', fontSize: 14 }}
+                    >
+                      {SCHOOL_LEVEL_OPTIONS.map(opt => (
+                        <option key={opt} value={opt}>
+                          {opt || '선택 안 함'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-              {/* 생년월일 */}
-              <label
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 4,
-                  fontSize: 13,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: '#6b7280',
-                    fontWeight: 500,
-                  }}
-                >
-                  생년월일
-                </span>
-                <input
-                  type="date"
-                  name="birth_date"
-                  value={editForm.birth_date || ''}
-                  onChange={handleEditChange}
-                  style={{
-                    width: '50%',
-                    padding: '9px 12px',
-                    borderRadius: 12,
-                    border: '1px solid #d1d5db',
-                    fontSize: 14,
-                  }}
-                />
-              </label>
+                  {/* 입학일 */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 4,
+                    }}
+                  >
+                    <label style={{ fontSize: 12, color: '#4b5563' }}>입학일</label>
+                    <input
+                      type="date"
+                      name="admission_date"
+                      value={editForm.admission_date}
+                      onChange={handleEditChange}
+                      className="app-input"
+                      style={{ padding: '6px 8px', fontSize: 14 }}
+                    />
+                  </div>
 
-              {/* 메모 – 전체 폭 사용 */}
-              <label
-                style={{
-                  gridColumn: '1 / -1',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 4,
-                  fontSize: 13,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: '#6b7280',
-                    fontWeight: 500,
-                  }}
-                >
-                  메모(별명/특이사항)
-                </span>
-                <textarea
-                  name="memo"
-                  value={editForm.memo}
-                  onChange={handleEditChange}
-                  rows={4}
-                  style={{
-                    width: '95%',
-                    padding: '9px 12px',
-                    borderRadius: 12,
-                    border: '1px solid #d1d5db',
-                    fontSize: 14,
-                    resize: 'vertical',
-                  }}
-                  placeholder="이 학생에 대한 간단한 메모를 남겨보세요."
-                />
-              </label>
+                  {/* 생년월일 */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 4,
+                    }}
+                  >
+                    <label style={{ fontSize: 12, color: '#4b5563' }}>생년월일</label>
+                    <input
+                      type="date"
+                      name="birth_date"
+                      value={editForm.birth_date}
+                      onChange={handleEditChange}
+                      className="app-input"
+                      style={{ padding: '6px 8px', fontSize: 14 }}
+                    />
+                  </div>
+                </div>
 
-              {/* 버튼 영역 – 전체 폭 사용 */}
-              <div
-                style={{
-                  gridColumn: '1 / -1',
-                  marginTop: 8,
-                  display: 'flex',
-                  justifyContent: 'flex-end',
-                  gap: 8,
-                }}
-              >
-                <button
-                  type="button"
-                  onClick={closeEditModal}
-                  className="btn secondary"
+                {/* 메모 */}
+                <div style={{ marginBottom: 8 }}>
+                  <label
+                    style={{
+                      display: 'block',
+                      marginBottom: 4,
+                      fontSize: 12,
+                      color: '#4b5563',
+                    }}
+                  >
+                    메모
+                  </label>
+                  <textarea
+                    name="memo"
+                    value={editForm.memo}
+                    onChange={handleEditChange}
+                    rows={3}
+                    className="app-input"
+                    style={{
+                      width: '100%',
+                      fontSize: 14,
+                      padding: 8,
+                      resize: 'vertical',
+                    }}
+                  />
+                </div>
+
+                <div
                   style={{
-                    padding: '8px 14px',
-                    borderRadius: 999,
-                    border: '1px solid #d1d5db',
-                    background: '#ffffff',
-                    fontSize: 14,
-                    cursor: 'pointer',
+                    display: 'flex',
+                    justifyContent: 'flex-end',
+                    gap: 8,
+                    marginTop: 12,
                   }}
                 >
-                  취소
-                </button>
-                <button
-                  type="submit"
-                  className="btn primary"
-                  disabled={savingEdit}
-                  style={{
-                    padding: '8px 18px',
-                    borderRadius: 999,
-                    border: 'none',
-                    background: '#2563eb',
-                    color: '#ffffff',
-                    fontSize: 14,
-                    cursor: savingEdit ? 'default' : 'pointer',
-                    opacity: savingEdit ? 0.7 : 1,
-                  }}
-                >
-                  {savingEdit ? '저장 중...' : '저장'}
-                </button>
-              </div>
-            </form>
+                  <button
+                    type="button"
+                    onClick={closeEditModal}
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: 6,
+                      border: '1px solid #d1d5db',
+                      backgroundColor: '#ffffff',
+                      fontSize: 14,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingEdit}
+                    className="app-button"
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: 6,
+                      border: 'none',
+                      backgroundColor: savingEdit ? '#9ca3af' : '#2563eb',
+                      color: '#ffffff',
+                      fontSize: 14,
+                      cursor: savingEdit ? 'default' : 'pointer',
+                      opacity: savingEdit ? 0.7 : 1,
+                    }}
+                  >
+                    {savingEdit ? '저장 중...' : '저장'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </Layout>
   )
 }

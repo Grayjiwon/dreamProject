@@ -22,6 +22,7 @@ function normalizeStudentsResponse(res) {
 
   if (res && Array.isArray(res.items)) list = res.items
   else if (Array.isArray(res)) list = res
+  else if (res && Array.isArray(res.data)) list = res.data
 
   const normalized = list
     .map(item => {
@@ -33,7 +34,23 @@ function normalizeStudentsResponse(res) {
         item.full_name ??
         item.display_name ??
         '이름 없음'
-      return id ? { id: String(id), name } : null
+      const alias =
+        item.alias ??
+        item.student_alias ??
+        item.nickname ??
+        ''
+      if (!id) return null
+      const label =
+        name && alias
+          ? `${name}(${alias})`
+          : name || alias || '이름 없음'
+      return {
+        ...item,
+        id: String(id),
+        name,
+        alias,
+        label,
+      }
     })
     .filter(Boolean)
 
@@ -141,8 +158,8 @@ export default function Dashboard() {
   )
 
   const queriedStudentLabel =
-    queriedStudent?.name ||
-    selectedStudent?.name ||
+    queriedStudent?.label ||
+    selectedStudent?.label ||
     (selectedStudentId ? '선택된 학생' : '해당')
 
   const emotionDetailsByName = useMemo(() => {
@@ -310,21 +327,19 @@ export default function Dashboard() {
       // /api/students 는 백엔드에서 Supabase students 테이블을 읽어오는 엔드포인트라고 가정
       const res = await apiFetch('/api/students', { method: 'GET' })
 
-      // 서버 응답이 { count, items: [...] } 형태일 수 있으므로 처리
-      const list = Array.isArray(res) ? res : (res.items || [])
+      const list = normalizeStudentsResponse(res)
 
       if (list.length > 0) {
-        // 예: [{ id: 'stu_1', name: '배짱(김배짱)' }, ...]
         setStudents(list)
         setSelectedStudentId(list[0].id)
       } else {
         setStudents([])
-        setSelectedStudentId(null)
+        setSelectedStudentId('')
       }
     } catch (e) {
       console.error(e)
       setStudents([])
-      setSelectedStudentId(null)
+      setSelectedStudentId('')
     }
   }
 
@@ -350,53 +365,50 @@ export default function Dashboard() {
       }
 
       // 1) 요약 지표 (총 기록 수, 평균 점수 등)
-      //    Supabase 집계 결과를 그대로 쓰되, 없으면 데모/기본값 사용
       setMetrics(res.metrics ?? demoMetrics)
 
-      // 2) 감정 분포 (예: [{ name: '기쁜', value: 9.5, count: 3 }, ...])
+      // 2) 감정 분포
       setEmotionData(res.emotionDistribution ?? demoEmotion)
 
-      // 3) 활동 시간 시계열 (예: [{ date: '2025-10-20', minutes: 60 }, ...])
+      // 3) 활동 시간 시계열
       setActivitySeries(res.activitySeries ?? demoActivitySeries)
 
       // 4) 활동별 능력/분석 카드 리스트
-      //    백엔드에서 적당히 필드 이름을 맞춰주고, 여기서 프론트용으로 살짝 다시 정제
       if (Array.isArray(res.activityAbilityList)) {
         setActivityAbilityList(
-          res.activityAbilityList.map(item => ({
-            id: item.id,
-            activity: item.activity,                 // 활동명
-            date: item.date_label ?? item.date,      // 표시용 날짜
-            levelType: item.level_type,             // 'excellent' | 'good' | 'need_support' 등
-            levelLabel: item.level_label,           // '매우 좋음' 등 한글 라벨
-            difficultyRatio: item.difficulty_ratio, // 난이도 비율
-            normalRatio: item.normal_ratio,         // 보통 비율
-            goodRatio: item.good_ratio,             // 우수 비율
-            totalScore: item.total_score,           // 총점/지수
-            hours: item.hours_label,                // '1시간 30분' 같은 문자열
-            mainSkills: item.main_skills ?? [],     // ['주의집중', '협동'] 같은 칩용 배열
-          })),
+          normalizeActivityAbilityList(res.activityAbilityList),
         )
       } else {
         setActivityAbilityList(demoActivityAbilityList)
       }
 
-      // Preserve existing logic for other states
       if (res.emotionDetails) setEmotionDetails(res.emotionDetails)
       if (res.activityDetails) setActivityDetails(res.activityDetails)
-      
-      const qStudent = students.find(s => s.id === studentId) || selectedStudent || null
-      if (typeof setQueriedStudent === 'function') setQueriedStudent(qStudent)
-      if (typeof setQueriedStartDate === 'function') setQueriedStartDate(from)
-      if (typeof setQueriedEndDate === 'function') setQueriedEndDate(to)
+
+      const qStudent =
+        students.find(s => s.id === studentId) ||
+        selectedStudent ||
+        null
+      setQueriedStudent(qStudent)
+      setQueriedStartDate(from || '')
+      setQueriedEndDate(to || '')
 
       // 첫 조회 시 채팅 인트로 메시지 없으면 생성
       if (!chatMessages.length && qStudent) {
+        const label =
+          qStudent.label || qStudent.name || '해당 학생'
+        const fromLabel = from || startDate || ''
+        const toLabel = to || endDate || ''
+        const rangeText =
+          fromLabel && toLabel
+            ? `${fromLabel} ~ ${toLabel}`
+            : fromLabel || '전체 기간'
+
         setChatMessages([
           {
             id: 'intro',
             role: 'assistant',
-            content: `${qStudent.name} 학생의 ${startDate} ~ ${endDate} 기록을 기반으로 대화를 도와드릴게요.\n무엇이 궁금하신가요?`,
+            content: `${label} 학생의 ${rangeText} 기록을 기반으로 대화를 도와드릴게요.\n무엇이 궁금하신가요?`,
           },
         ])
       }
@@ -450,7 +462,6 @@ export default function Dashboard() {
     e.preventDefault()
     if (!selectedStudentId) return
 
-    // 🔹 기간 검증: 시작일이 종료일보다 늦으면 막기
     if (isInvalidRange) {
       alert('시작일이 종료일보다 늦을 수 없습니다.')
       return
@@ -496,7 +507,10 @@ export default function Dashboard() {
     try {
       const payload = {
         studentId: queriedStudent?.id || selectedStudentId || null,
-        studentName: queriedStudent?.name || null,
+        studentName:
+          queriedStudent?.label ||
+          queriedStudent?.name ||
+          null,
         startDate: queriedStartDate,
         endDate: queriedEndDate,
         message: userMessage.content,
@@ -565,7 +579,9 @@ export default function Dashboard() {
               <div className="filter-student-panel">
                 <div className="student-summary-top">
                   <div className="student-avatar">
-                    {selectedStudent?.name?.charAt(0) ?? '학'}
+                    {selectedStudent?.label?.charAt(0) ??
+                      selectedStudent?.name?.charAt(0) ??
+                      '학'}
                   </div>
 
                   <div className="student-header-right">
@@ -580,7 +596,7 @@ export default function Dashboard() {
                         <option value="">학생 선택</option>
                         {students.map(s => (
                           <option key={s.id} value={s.id}>
-                            {s.name}
+                            {s.label || s.name}
                           </option>
                         ))}
                       </select>
@@ -596,7 +612,7 @@ export default function Dashboard() {
 
                     <div className="student-tagline">
                       {queriedStudent
-                        ? `${queriedStudent.name}님의 ${
+                        ? `${(queriedStudent.label || queriedStudent.name)} 학생의 ${
                             queriedStartDate && queriedEndDate
                               ? `${queriedStartDate} ~ ${queriedEndDate}`
                               : '선택 기간'
