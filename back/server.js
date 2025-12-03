@@ -28,6 +28,8 @@ process.on('unhandledRejection', (reason) => {
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
+  'https://dream-project-theta.vercel.app',
+  'https://creative-elf-1b8dcf.netlify.app',
 ];
 
 // 환경변수 FRONTEND_ORIGINS에 쉼표로 여러 개 지정 가능
