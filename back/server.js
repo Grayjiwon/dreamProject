@@ -38,7 +38,10 @@ const envOrigins = (process.env.FRONTEND_ORIGINS || process.env.FRONTEND_ORIGIN 
   .map(s => s.trim())
   .filter(Boolean);
 
-const ALLOWED_ORIGINS = envOrigins.length ? envOrigins : DEFAULT_ALLOWED_ORIGINS;
+// 환경 변수와 기본값을 병합 (중복 제거)
+const ALLOWED_ORIGINS = envOrigins.length 
+  ? [...new Set([...DEFAULT_ALLOWED_ORIGINS, ...envOrigins])] // 환경 변수와 기본값 병합
+  : DEFAULT_ALLOWED_ORIGINS;
 console.log('[CORS] Allowed origins:', ALLOWED_ORIGINS);
 
 const corsOptions = {
